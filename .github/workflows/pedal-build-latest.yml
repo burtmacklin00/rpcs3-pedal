@@ -1,0 +1,98 @@
+# Pedal Config build of the latest RPCS3 (Windows), same steps as RPCS3's own Windows CI job
+# (rpcs3.yml "RPCS3 Windows"), minus ccache and their release upload.
+name: Pedal build latest (Windows)
+
+on:
+  push:
+    branches: [ pedal-latest ]
+  workflow_dispatch:
+
+env:
+  BUILD_REPOSITORY_NAME: ${{ github.repository }}
+  BUILD_SOURCEBRANCHNAME: ${{ github.ref_name }}
+  BUILD_PR_NUMBER: ${{ github.event.pull_request.number }}
+  BUILD_SOURCEVERSION: ${{ github.sha }}
+  BUILD_ARTIFACTSTAGINGDIRECTORY: ${{ github.workspace }}/artifacts/
+
+jobs:
+  windows:
+    runs-on: windows-2025-vs2026
+    env:
+      COMPILER: msvc
+      QT_VER_MAIN: '6'
+      QT_VER: '6.12.0'
+      QT_VER_MSVC: 'msvc2022'
+      QT_DATE: '202609280346'
+      LLVM_VER: '22.1.8'
+      VULKAN_VER: '1.4.341.1'
+      VULKAN_SDK_SHA: 'bcf2d75aa9556889ab974858666e20b3655b6055a0db704ccb47279ff33b5bfe'
+      CCACHE_SHA: '859141059ac950e1e8cd042c66f842f26b9e3a62a1669a69fe6ba180cb58bbdf'
+      CCACHE_BIN_DIR: 'C:\ccache_bin'
+      CCACHE_DIR: 'C:\ccache'
+      DEPS_CACHE_DIR: ./dependency_cache
+      SKIP_RPCS3_TEST: 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore rpcs3.sln
+
+      - name: Setup env
+        shell: pwsh
+        run: |
+          echo "QTDIR=C:\Qt\${{ env.QT_VER }}\${{ env.QT_VER_MSVC }}_64" >> ${{ github.env }}
+          echo "VULKAN_SDK=C:\VulkanSDK\${{ env.VULKAN_VER }}" >> ${{ github.env }}
+
+      - name: Download and unpack dependencies
+        shell: bash
+        run: |
+          .ci/setup-windows.sh
+          .ci/setup-windows-ci-vars.sh win64 msvc
+
+      - name: Export Variables
+        shell: bash
+        run: |
+          while IFS='=' read -r key val; do
+            [[ -z "$key" || "$key" =~ ^# ]] && continue
+            echo "$key=$val" >> "${{ github.env }}"
+          done < .ci/ci-vars.env
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Compile RPCS3
+        shell: pwsh
+        # Empty repo name = the exe calls itself a "local_build" (like the v0.0.32 pedal build),
+        # so RPCS3 doesn't pop up its "Experimental Build Warning" on every start.
+        env:
+          BUILD_REPOSITORY_NAME: ''
+          BUILD_SOURCEBRANCHNAME: ''
+        run: msbuild rpcs3.sln /p:Configuration=Release /v:minimal /p:Platform=x64 /p:PreferredToolArchitecture=x64 /p:UseMultiToolTask=true /p:CustomAfterMicrosoftCommonTargets="${{ github.workspace }}\buildfiles\msvc\ci_only.targets"
+
+      - name: Pack up build artifacts
+        shell: bash
+        run: |
+          mkdir -p "${{ env.BUILD_ARTIFACTSTAGINGDIRECTORY }}"
+          mkdir -p exe-only && cp ./bin/rpcs3.exe exe-only/
+          ( cd exe-only && sha256sum rpcs3.exe > SHA256SUMS.txt )
+          .ci/deploy-windows.sh
+
+      - name: Upload rpcs3.exe only
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpcs3-latest-exe-pedal
+          path: exe-only/
+
+      - name: Upload full build (7z)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpcs3-latest-pedal-full
+          path: ${{ env.BUILD_ARTIFACTSTAGINGDIRECTORY }}
+          compression-level: 0
+          if-no-files-found: error
