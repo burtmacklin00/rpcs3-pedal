@@ -20,6 +20,7 @@
 #include "util/yaml.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cstdlib>
@@ -44,6 +45,9 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   Match = timecrisis4.self         ; text in the running game's executable path or title ID
 //                                    ; (several allowed, separated by commas)
 //   Debug = 1                        ; optional: write every value change to RPCS3.log
+//   AmmoNeedsLife = 1                ; optional: Pn_Ammo is sent as 0 while Pn_Life is 0 (player not in the game)
+//   KickWhen = ShootFlag 1           ; optional: recoil kicks only while output ShootFlag is 1
+//   HoldWhen = ShootFlag 0           ; optional: while ShootFlag is 0, holding a gun's trigger sends Pn_Hold 1/0 every 100 ms
 //   Capture = 1                      ; optional: memory snapshot after every trigger pull (for finding addresses;
 //                                    ; files are named ..._P1shot / _P2shot). Remove when done.
 //
@@ -97,6 +101,11 @@ namespace
 		std::vector<std::string> match;
 		bool debug = false;
 		bool capture = false;      // Capture = 1: memory snapshot automatically after every gun trigger pull (finding addresses)
+		std::string kick_when;     // KickWhen = <output> <value>: recoil kicks only while that output has that value
+		s64 kick_when_value = 0;
+		std::string hold_when;     // HoldWhen = <output> <value>: while it has that value, holding a gun's trigger sends Pn_Hold
+		s64 hold_when_value = 0;   //   (1/0 every 100 ms, e.g. rumble while turning a wheel)
+		bool ammo_needs_life = false; // AmmoNeedsLife = 1: Pn_Ammo is sent as 0 while Pn_Life is 0 (player not playing)
 		std::vector<u8> find;      // Find = bytes (hex) the game keeps next to its values; outputs with @ addresses follow it
 		u32 find_lo = 0x30000000;  // FindIn = <start> <end> (default 0x30000000 0x40000000)
 		u32 find_hi = 0x40000000;
@@ -231,6 +240,18 @@ namespace
 					}
 					else if (lower(key) == "debug") game.debug = val == "1" || lower(val) == "true";
 					else if (lower(key) == "capture") game.capture = val == "1" || lower(val) == "true";
+					else if (lower(key) == "ammoneedslife") game.ammo_needs_life = val == "1" || lower(val) == "true";
+					else if (lower(key) == "kickwhen" || lower(key) == "holdwhen")
+					{
+						const auto r = fmt::split(val, {" ", "\t"});
+						s64 n = 0;
+						if (r.size() == 2 && parse_number(r[1], n))
+						{
+							(lower(key) == "kickwhen" ? game.kick_when : game.hold_when) = r[0];
+							(lower(key) == "kickwhen" ? game.kick_when_value : game.hold_when_value) = n;
+						}
+						else outputs_log.error("%s: could not read '%s = %s'", entry.name, key, val);
+					}
 					else if (lower(key) == "find")
 					{
 						std::string hex;
@@ -355,7 +376,8 @@ namespace
 			}
 		}
 		std::string active_key;
-		std::map<std::string, s64> values;     // last value of every output (watched + made)
+		std::map<std::string, s64> values;     // last value of every output (watched + made), as sent
+		std::map<std::string, s64> raw;        // last value read from the game (watched outputs)
 		std::map<std::string, bool> have;      // watched output read at least once
 		std::deque<pulse> pulses;
 
@@ -478,7 +500,10 @@ namespace
 			active = nullptr;
 			active_key.clear();
 			values.clear();
+			raw.clear();
 			found = 0;
+			hold_state = {};
+			hold_next = {};
 			have.clear();
 			pulses.clear();
 		}
@@ -578,30 +603,114 @@ namespace
 				s64 v = 0;
 				if (!read_value(o, found, v)) continue;
 
-				const auto old_it = values.find(o.name);
-				const bool had = have[o.name] && old_it != values.end();
+				const auto old_it = raw.find(o.name);
+				const bool had = have[o.name] && old_it != raw.end();
 				const s64 old = had ? old_it->second : v;
-				set(o.name, v);
+				raw[o.name] = v;
 				have[o.name] = true;
 
 				std::string prefix, what;
-				if (!had || !split_player(o.name, prefix, what)) continue;
+				const bool is_player = split_player(o.name, prefix, what);
+
+				// AmmoNeedsLife: the ammo shown is sent after the loop (0 while that player's life is 0)
+				if (!(active->ammo_needs_life && is_player && what == "ammo")) set(o.name, v);
+
+				if (!had || !is_player) continue;
 
 				// Games with several weapons: P1_Ammo_Pistol, P1_Ammo_MG ... each kick when they go down.
 				// If a player has any of those, plain P1_Ammo is only the number shown (no kick from it).
 				const bool ammo_kicks = what.starts_with("ammo_") || (what == "ammo" && !active_has(lower(prefix) + "ammo_"));
 
-				if (ammo_kicks && v < old && old - v <= 5)
+				if (ammo_kicks && v < old && old - v <= 5 && kick_allowed())
 				{
 					add_pulses(o.kick.empty() ? prefix + "CtmRecoil" : o.kick, static_cast<int>(old - v), now, o.kick_ms, 40);
 				}
-				else if (what == "shots" && v > old && v - old <= 5)
+				else if (what == "shots" && v > old && v - old <= 5 && kick_allowed())
 				{
 					add_pulses(o.kick.empty() ? prefix + "CtmRecoil" : o.kick, static_cast<int>(v - old), now, o.kick_ms, 40);
 				}
 				else if (what == "life" && v < old)
 				{
 					add_pulses(prefix + (v > 0 ? "Damaged" : "Death"), 1, now, 150, 0);
+				}
+			}
+
+			if (active->ammo_needs_life)
+			{
+				for (const output_def& o : active->outputs)
+				{
+					std::string prefix, what;
+					if (!split_player(o.name, prefix, what) || what != "ammo") continue;
+					const auto a = raw.find(o.name);
+					if (a == raw.end()) continue;
+					const s64* life = raw_value(lower(prefix) + "life");
+					set(o.name, life && *life > 0 ? a->second : 0);
+				}
+			}
+
+			update_hold(now);
+		}
+
+		// value read from the game for an output name (any letter case), or nullptr
+		const s64* raw_value(const std::string& name_lower) const
+		{
+			for (const auto& [name, v] : raw)
+			{
+				if (lower(name) == name_lower) return &v;
+			}
+			return nullptr;
+		}
+
+		bool kick_allowed() const
+		{
+			if (active->kick_when.empty()) return true;
+			const s64* v = raw_value(lower(active->kick_when));
+			return v && *v == active->kick_when_value;
+		}
+
+		// Gun triggers held right now (bit 0 = player 1)
+		static u8 read_triggers()
+		{
+			u8 triggers = 0;
+			if (auto* handler = g_fxo->try_get<MouseHandlerBase>())
+			{
+				std::lock_guard lock(handler->mutex);
+				const auto& mice = handler->GetMice();
+				for (usz i = 0; i < mice.size() && i < 4; i++)
+				{
+					if (mice[i].buttons & CELL_MOUSE_BUTTON_1) triggers |= static_cast<u8>(1u << i);
+				}
+			}
+			return triggers;
+		}
+
+		std::array<clock_type::time_point, 4> hold_next{};
+		std::array<int, 4> hold_state{};
+
+		void update_hold(clock_type::time_point now)
+		{
+			if (active->hold_when.empty()) return;
+
+			const s64* flag = raw_value(lower(active->hold_when));
+			const bool mode = flag && *flag == active->hold_when_value;
+			const u8 triggers = mode ? read_triggers() : 0;
+
+			for (u32 i = 0; i < 4; i++)
+			{
+				const std::string name = "P" + std::to_string(i + 1) + "_Hold";
+				if (triggers & (1u << i))
+				{
+					if (now >= hold_next[i])
+					{
+						hold_state[i] ^= 1;
+						hold_next[i] = now + std::chrono::milliseconds(100);
+						set(name, hold_state[i]);
+					}
+				}
+				else if (hold_state[i])
+				{
+					hold_state[i] = 0;
+					set(name, 0);
 				}
 			}
 		}
@@ -632,17 +741,7 @@ namespace
 		{
 			if (!active || !active->capture || !Emu.IsRunning()) return;
 
-			u8 triggers = 0;
-			if (auto* handler = g_fxo->try_get<MouseHandlerBase>())
-			{
-				std::lock_guard lock(handler->mutex);
-				const auto& mice = handler->GetMice();
-				for (usz i = 0; i < mice.size() && i < 4; i++)
-				{
-					if (mice[i].buttons & CELL_MOUSE_BUTTON_1) triggers |= static_cast<u8>(1u << i);
-				}
-			}
-
+			const u8 triggers = read_triggers();
 			const u8 pressed = triggers & ~last_triggers;
 			last_triggers = triggers;
 			const auto now = clock_type::now();
