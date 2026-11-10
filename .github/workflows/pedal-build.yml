@@ -1,0 +1,131 @@
+# Builds RPCS3 v0.0.32-16737 (c4160a38, the version Micks Light Gun Build ships) with the
+# foot pedal patch, for Windows. Same steps as RPCS3's own Azure Windows build of that version
+# (.ci/setup-windows.sh / azure-pipelines.yml), with downloads that still work today.
+name: Pedal build (Windows)
+
+on:
+  push:
+    branches: [ pedal-v0.0.32 ]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    env:
+      QT_VER: '6.6.3'
+      VULKAN_VER: '1.3.268.0'
+      QTDIR: C:\Qt\6.6.3\msvc2019_64
+      VULKAN_SDK: C:\VulkanSDK\1.3.268.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # full history so the version number is like the original
+
+      - name: Submodules (all except llvm / FAudio / SPIRV, like RPCS3's script)
+        shell: bash
+        run: git submodule -q update --init --depth=1 --jobs=8 $(awk '/path/ && !/FAudio/ && !/llvm/ && !/SPIRV/ { print $3 }' .gitmodules)
+
+      - name: Qt 6.6.3 (msvc2019_64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.6.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2019_64
+          dir: 'C:\'
+          modules: 'qtmultimedia'
+          cache: true
+
+      - name: Vulkan SDK 1.3.268.0
+        shell: bash
+        run: |
+          set -e
+          curl -fLo VulkanSDK.exe "https://sdk.lunarg.com/sdk/download/${VULKAN_VER}/windows/VulkanSDK-${VULKAN_VER}-Installer.exe" \
+            || curl -fLo VulkanSDK.exe "https://www.dropbox.com/scl/fi/sjjh0fc4ld281pjbl2xzu/VulkanSDK-1.3.268.0-Installer.exe?rlkey=f6wzc0lvms5vwkt2z3qabfv9d&dl=1"
+          echo "8459ef49bd06b697115ddd3d97c9aec729e849cd775f5be70897718a9b3b9db5  VulkanSDK.exe" | sha256sum -c -
+          ./VulkanSDK.exe --root "C:\\VulkanSDK\\${VULKAN_VER}" --accept-licenses --default-answer --confirm-command install
+          ls "/c/VulkanSDK/${VULKAN_VER}/Include/vulkan" | head -3
+
+      - name: LLVM + glslang libraries (RPCS3's own Windows builds)
+        shell: bash
+        run: |
+          set -e
+          mkdir -p lib
+          curl -fLo llvmlibs_mt.7z https://github.com/RPCS3/llvm-mirror/releases/download/custom-build-win-16.0.1/llvmlibs_mt.7z
+          echo "$(curl -fsL https://github.com/RPCS3/llvm-mirror/releases/download/custom-build-win-16.0.1/llvmlibs_mt.7z.sha256 | awk '{print $1}')  llvmlibs_mt.7z" | sha256sum -c -
+          7z x -y llvmlibs_mt.7z -aos -o./3rdparty/llvm
+          curl -fLo glslanglibs_mt.7z https://github.com/RPCS3/glslang/releases/download/custom-build-win/glslanglibs_mt.7z
+          7z x -y glslanglibs_mt.7z -aos -o./lib/Release-x64
+
+      # The official v0.0.32 exe was compiled with MSVC 14.40 (VS 17.10). A newer compiler (14.44)
+      # gave a build that crashed in RSX's ZCULL code when a game restarts itself (exitspawn),
+      # so use the same compiler as the original.
+      - name: MSVC 14.40 toolset (same compiler as the official build)
+        shell: pwsh
+        run: |
+          $vs = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
+          Get-ChildItem "$vs\VC\Tools\MSVC" | Select-Object -ExpandProperty Name
+          if (-not (Get-ChildItem "$vs\VC\Tools\MSVC" -Filter "14.40.*")) {
+            $p = Start-Process -Wait -PassThru -FilePath "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" `
+              -ArgumentList 'modify','--installPath',"`"$vs`"",'--add','Microsoft.VisualStudio.Component.VC.14.40.17.10.x86.x64','--quiet','--norestart','--nocache'
+            "installer exit code: $($p.ExitCode)"
+          }
+          Get-ChildItem "$vs\VC\Tools\MSVC" | Select-Object -ExpandProperty Name
+          if (-not (Get-ChildItem "$vs\VC\Tools\MSVC" -Filter "14.40.*")) { throw "MSVC 14.40 not available" }
+
+      # RPCS3's prebuilt glslang (releases/latest) no longer matches the glslang source this
+      # version was written against: the shader compiler's settings struct didn't line up and
+      # RPCS3's own overlay shader failed to compile ("inductive-loop termination") - black
+      # screen. Build glslang from the exact submodule source instead, static runtime (/MT).
+      - name: glslang from v0.0.32's own submodule source
+        shell: bash
+        run: |
+          set -e
+          git -C 3rdparty/glslang/glslang log -1 --format="glslang source: %h %ad %s"
+          cmake -S 3rdparty/glslang/glslang -B glslang-build -G "Visual Studio 17 2022" -A x64 -T "v143,version=14.40" \
+            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DENABLE_OPT=OFF -DENABLE_GLSLANG_BINARIES=OFF -DGLSLANG_TESTS=OFF -DBUILD_TESTING=OFF \
+            -DENABLE_CTEST=OFF -DSKIP_GLSLANG_INSTALL=ON -DBUILD_EXTERNAL=OFF
+          cmake --build glslang-build --config Release --parallel -- -nodeReuse:false
+          find glslang-build -path "*Release*" -name "*.lib" -print -exec cp -f {} ./lib/Release-x64/ \;
+          ls -la ./lib/Release-x64/
+
+      - name: Build (MSBuild, Release x64)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64 -vcvars_ver=14.40
+          cl 2>&1 | findstr /C:"Version"
+          msbuild rpcs3.sln /m /p:Configuration=Release /p:Platform=x64 /p:VCToolsVersion=%VCToolsVersion% /v:minimal
+
+      - name: Package
+        shell: bash
+        run: |
+          set -e
+          mkdir -p sym && cp ./bin/rpcs3.pdb sym/ || true
+          rm -f ./bin/rpcs3.exp ./bin/rpcs3.lib ./bin/rpcs3.pdb ./bin/vc_redist.x64.exe
+          rm -rf ./bin/git
+          mkdir -p out
+          cp ./bin/rpcs3.exe out/
+          7z a -mx9 "rpcs3-v0.0.32-pedal_win64.7z" ./bin/*
+          sha256sum out/rpcs3.exe rpcs3-v0.0.32-pedal_win64.7z | tee SHA256SUMS.txt
+
+      - name: Upload rpcs3.exe only (drop-in replacement)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpcs3-exe-pedal
+          path: |
+            out/rpcs3.exe
+            SHA256SUMS.txt
+
+      - name: Upload full build
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpcs3-v0.0.32-pedal-full
+          path: rpcs3-v0.0.32-pedal_win64.7z
+
+      - name: Upload symbols (only for reading crash addresses)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpcs3-pedal-pdb
+          path: sym/rpcs3.pdb

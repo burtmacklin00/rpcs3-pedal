@@ -1,0 +1,13 @@
+# OpenAL
+if(USE_SYSTEM_OPENAL)
+	find_package(OpenAL REQUIRED)
+	add_library(3rdparty_openal INTERFACE)
+	target_include_directories(3rdparty_openal INTERFACE ${OPENAL_INCLUDE_DIR})
+	target_link_libraries(3rdparty_openal INTERFACE ${OPENAL_LIBRARY})
+else()
+	option(ALSOFT_UTILS "Build utility programs"  OFF)
+	option(ALSOFT_EXAMPLES  "Build example programs"  OFF)
+	add_subdirectory(openal-soft EXCLUDE_FROM_ALL)
+	add_library(3rdparty_openal INTERFACE)
+	target_link_libraries(3rdparty_openal INTERFACE OpenAL::OpenAL)
+endif()
