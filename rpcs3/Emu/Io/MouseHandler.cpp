@@ -12,13 +12,17 @@ MouseHandlerBase::MouseHandlerBase(utils::serial* ar)
 		return;
 	}
 
-	(*ar)(m_info.max_connect);
+	// Pedal build: keep m_info.max_connect at 0 until Init runs. Setting it here made Init think the handler
+	// was already initialized, so after loading a savestate the guns (raw mouse) were never set up
+	// (Wicked Monsters Blast: no gun input at all after loading).
+	u32 max_connect = 0;
+	(*ar)(max_connect);
 
-	if (m_info.max_connect)
+	if (max_connect)
 	{
-		Emu.PostponeInitCode([this]()
+		Emu.PostponeInitCode([this, max_connect]()
 		{
-			Init(m_info.max_connect);
+			Init(max_connect);
 			auto lk = init.init();
 		});
 	}
