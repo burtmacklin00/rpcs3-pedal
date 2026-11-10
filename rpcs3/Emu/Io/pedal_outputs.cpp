@@ -46,6 +46,7 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //                                    ; (several allowed, separated by commas)
 //   Debug = 1                        ; optional: write every value change to RPCS3.log
 //   AmmoNeedsLife = 1                ; optional: Pn_Ammo is sent as 0 while Pn_Life is 0 (player not in the game)
+//   Pn_Playing = <address>           ; optional output: 0 = player not in the game -> Pn_Ammo and Pn_Life are sent as 0
 //   KickWhen = ShootFlag 1           ; optional: recoil kicks only while output ShootFlag is 1
 //   HoldWhen = ShootFlag 0           ; optional: while ShootFlag is 0, holding a gun's trigger sends Pn_Hold 1/0 every 100 ms
 //   Capture = 1                      ; optional: memory snapshot after every trigger pull (for finding addresses;
@@ -612,8 +613,11 @@ namespace
 				std::string prefix, what;
 				const bool is_player = split_player(o.name, prefix, what);
 
-				// AmmoNeedsLife: the ammo shown is sent after the loop (0 while that player's life is 0)
-				if (!(active->ammo_needs_life && is_player && what == "ammo")) set(o.name, v);
+				// AmmoNeedsLife / Pn_Playing: the ammo (and with Pn_Playing the life) shown is sent after the loop,
+				// as 0 while that player is not in the game
+				const bool gated = is_player && ((active->ammo_needs_life && what == "ammo") ||
+					(what == "ammo" || what == "life") && raw_value(lower(prefix) + "playing"));
+				if (!gated) set(o.name, v);
 
 				if (!had || !is_player) continue;
 
@@ -635,14 +639,20 @@ namespace
 				}
 			}
 
-			if (active->ammo_needs_life)
+			for (const output_def& o : active->outputs)
 			{
-				for (const output_def& o : active->outputs)
+				std::string prefix, what;
+				if (!split_player(o.name, prefix, what) || (what != "ammo" && what != "life")) continue;
+				const auto a = raw.find(o.name);
+				if (a == raw.end()) continue;
+
+				// Pn_Playing (if the game file has it): 0 = player not in the game -> ammo and life shown as 0
+				if (const s64* playing = raw_value(lower(prefix) + "playing"))
 				{
-					std::string prefix, what;
-					if (!split_player(o.name, prefix, what) || what != "ammo") continue;
-					const auto a = raw.find(o.name);
-					if (a == raw.end()) continue;
+					set(o.name, *playing != 0 ? a->second : 0);
+				}
+				else if (active->ammo_needs_life && what == "ammo")
+				{
 					const s64* life = raw_value(lower(prefix) + "life");
 					set(o.name, life && *life > 0 ? a->second : 0);
 				}
