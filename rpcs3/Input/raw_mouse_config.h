@@ -49,6 +49,16 @@ public:
 	// e.g. "49=Button 7, 53=Button 6" (key 1 = Start, key 5 = Select). Empty = off.
 	cfg::string key_buttons{ this, "Key Buttons", "", true };
 
+	// From the MLGB lightgun fork. Only used by The Shoot (BCUS98222) and HOTD Overkill Extended Cut (BLUS30774);
+	// set per game in profiles/*.yml. Aim scale: % of the screen the gun covers, from the centre (100 = normal).
+	cfg::uint<10, 200> move_aim_scale_h{ this, "Move Aim Scale Horizontal", 100, true };
+	cfg::uint<10, 200> move_aim_scale_v{ this, "Move Aim Scale Vertical", 100, true };
+	// The Shoot gestures: Showtime spin (Square input), point down (Triangle input), off-screen = point up
+	cfg::_bool shoot_spin_360{ this, "The Shoot Spin 360", false, true };
+	cfg::_bool shoot_point_down{ this, "The Shoot Point Down", false, true };
+	cfg::_bool shoot_point_up_offscreen{ this, "The Shoot Point Up Offscreen", false, true };
+	cfg::_bool shoot_offscreen_middle{ this, "The Shoot Offscreen Middle", false, true };
+
 	cfg::string& get_button_by_index(int index);
 	cfg::string& get_button(int code);
 

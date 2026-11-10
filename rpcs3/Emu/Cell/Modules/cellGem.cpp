@@ -16,6 +16,9 @@
 #include "Emu/RSX/Overlays/overlay_cursor.h"
 #include "Input/pad_thread.h"
 #include "Input/ps_move_config.h"
+#include "Input/raw_mouse_config.h"
+#include "Input/lightgun_spin.h"
+#include "Input/lightgun_aim_scale.h"
 #include "Input/ps_move_tracker.h"
 
 #ifdef HAVE_LIBEVDEV
@@ -24,6 +27,7 @@
 
 #include <cmath> // for fmod
 #include <type_traits>
+#include <deque>
 
 LOG_CHANNEL(cellGem);
 
@@ -157,9 +161,25 @@ cfg_gems g_cfg_gem_real;
 cfg_fake_gems g_cfg_gem_fake;
 cfg_mouse_gems g_cfg_gem_mouse;
 
+// Pedal build: games that use the MLGB lightgun fork's motion data instead of the v0.0.32 behaviour:
+// The Shoot (BCUS98222) and The House of the Dead: Overkill Extended Cut (BLUS30774)
+static inline bool gem_mlgb_title()
+{
+	if (g_cfg.io.move != move_handler::raw_mouse) return false;
+	const std::string id = Emu.GetTitleID();
+	return id == "BCUS98222" || id == "BLUS30774";
+}
+
 // Pedal build: mouse / raw mouse guns behave exactly like RPCS3 v0.0.32
 // (buttons + combos, aim data, visibility, calibration and status flags).
 static inline bool gem_v032_mouse()
+{
+	return (g_cfg.io.move == move_handler::mouse || g_cfg.io.move == move_handler::raw_mouse) && !gem_mlgb_title();
+}
+
+// Pedal build: the v0.0.32 button layout and combos are used by every mouse / raw mouse game,
+// including the MLGB games (so Key Buttons, the pedal and profiles work the same everywhere)
+static inline bool gem_v032_buttons()
 {
 	return g_cfg.io.move == move_handler::mouse || g_cfg.io.move == move_handler::raw_mouse;
 }
@@ -254,6 +274,17 @@ public:
 	u64 start_timestamp_us = 0;
 
 	std::array<ps_move_data, CELL_GEM_MAX_NUM> fake_move_data {}; // No need to be in savestate
+
+	// MLGB lightgun fork: transient synthetic samples for The Shoot's timestamp-based input queries
+	// and gesture / motion state (not in savestates)
+	std::mutex mouse_history_mutex;
+	std::array<std::deque<CellGemState>, CELL_GEM_MAX_NUM> mouse_history;
+	u64 mouse_history_epoch = 0;
+	std::array<lightgun_spin, CELL_GEM_MAX_NUM> mouse_spin;
+	std::array<lightgun_middle_gesture, CELL_GEM_MAX_NUM> mouse_middle_gesture;
+	std::array<ps_move_data::vect<3>, CELL_GEM_MAX_NUM> mouse_spin_origin;
+	std::array<u64, CELL_GEM_MAX_NUM> mouse_orientation_time{};
+	std::array<ps_move_data::vect<4>, CELL_GEM_MAX_NUM> mouse_previous_orientation{};
 
 	atomic_t<u32> m_wake_up = 0;
 	atomic_t<u32> m_done = 0;
@@ -1865,6 +1896,32 @@ static inline void pos_to_gem_image_state(u32 gem_num, gem_config::gem_controlle
 	}
 }
 
+// MLGB lightgun fork: The Shoot gesture switches (per player, from profiles/The Shoot.yml "Raw Mouse")
+static bool shoot_raw_flag(u32 player, cfg::_bool raw_mouse_config::* flag)
+{
+	if (g_cfg.io.move != move_handler::raw_mouse || Emu.GetTitleID() != "BCUS98222" || player >= g_cfg_raw_mouse.players.size()) return false;
+	reader_lock config_lock(g_cfg_raw_mouse.m_mutex);
+	return (g_cfg_raw_mouse.players[player].get()->*flag).get();
+}
+
+static bool shoot_spin_enabled(u32 player) { return shoot_raw_flag(player, &raw_mouse_config::shoot_spin_360); }
+static bool shoot_point_down_enabled(u32 player) { return shoot_raw_flag(player, &raw_mouse_config::shoot_point_down); }
+static bool shoot_point_up_enabled(u32 player) { return shoot_raw_flag(player, &raw_mouse_config::shoot_point_up_offscreen); }
+static bool shoot_offscreen_middle_enabled(u32 player)
+{
+	return shoot_point_down_enabled(player) && shoot_raw_flag(player, &raw_mouse_config::shoot_offscreen_middle);
+}
+
+// MLGB lightgun fork: per-game aim scale (Move Aim Scale Horizontal / Vertical), raw mouse only
+static std::pair<f32, f32> mlgb_aim(u32 mouse_no, f32 x, f32 y)
+{
+	if (g_cfg.io.move != move_handler::raw_mouse || mouse_no >= g_cfg_raw_mouse.players.size()) return {x, y};
+	reader_lock config_lock(g_cfg_raw_mouse.m_mutex);
+	const auto& config = g_cfg_raw_mouse.players[mouse_no];
+	return {lightgun_scale_axis(x, static_cast<float>(config->move_aim_scale_h.get())),
+		lightgun_scale_axis(y, static_cast<float>(config->move_aim_scale_v.get()))};
+}
+
 static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& controller, vm::ptr<CellGemState>& gem_state, f32 x_pos, f32 y_pos, ps_move_data& move_data)
 {
 	const auto& shared_data = g_fxo->get<gem_camera_shared>();
@@ -1917,6 +1974,89 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 		quat.y() = cr * sp * cy + sr * cp * sy;
 		quat.z() = cr * cp * sy - sr * sp * cy;
 		quat.w() = cr * cp * cy + sr * sp * sy;
+	}
+
+	// MLGB lightgun fork: supply a coherent inertial stream for supported mouse-backed Move games.
+	// A changing quaternion with an always-zero gyro describes conflicting motion.
+	if (gem_mlgb_title())
+	{
+		auto& gem = g_fxo->get<gem_config>();
+		std::lock_guard history_lock(gem.mouse_history_mutex);
+		const u64 now = get_guest_system_time();
+		auto& spin = gem.mouse_spin[gem_num];
+		const bool was_spinning = spin.active;
+		auto& middle = gem.mouse_middle_gesture[gem_num];
+		middle.update((gem_state->pad.digitalbuttons & CELL_GEM_CTRL_SQUARE) != 0,
+			x_pos <= 0.f || x_pos >= 1.f || y_pos <= 0.f || y_pos >= 1.f, shoot_offscreen_middle_enabled(gem_num));
+		const float angle = spin.update(now, shoot_spin_enabled(gem_num) && middle.held && !middle.point_down);
+		auto& origin = gem.mouse_spin_origin[gem_num];
+		if (spin.active && !was_spinning)
+		{
+			origin = ps_move_data::vect<3>({gem_state->pos[0], gem_state->pos[1], gem_state->pos[2]});
+			cellGem.notice("The Shoot P%d: started Showtime turn (yaw + 600 mm orbit)", gem_num + 1);
+		}
+		if (spin.active)
+		{
+			// The game's roundhouse detector checks horizontal facing directions
+			// AND sphere travel. Simulate the arm orbit during a body turn.
+			const float sy = std::sin(angle * .5f), cy = std::cos(angle * .5f);
+			const auto base = quat;
+			quat.x() = cy*base.x() + sy*base.z();
+			quat.y() = cy*base.y() + sy*base.w();
+			quat.z() = cy*base.z() - sy*base.x();
+			quat.w() = cy*base.w() - sy*base.y();
+			const auto offset = lightgun_spin::orbit(angle);
+			gem_state->pos[0] = origin.x() + offset[0];
+			gem_state->pos[1] = origin.y();
+			gem_state->pos[2] = origin.z() + offset[1];
+		}
+
+		const bool point_down = shoot_point_down_enabled(gem_num) &&
+			((gem_state->pad.digitalbuttons & CELL_GEM_CTRL_TRIANGLE) || middle.point_down);
+		const bool offscreen = x_pos <= 0.f || x_pos >= 1.f || y_pos <= 0.f || y_pos >= 1.f;
+		const int vertical = lightgun_vertical_direction(spin.active, point_down, offscreen, shoot_point_up_enabled(gem_num));
+		if (vertical != 0)
+		{
+			// Off-screen prepares the upward pose; the player's real trigger supplies
+			// the new-press edge required by the game's shoot-in-air gesture.
+			constexpr float c = 0.7071067811865475f;
+			const float s = c * vertical;
+			const auto base = quat;
+			quat.x() = c*base.x() + s*base.w();
+			quat.y() = c*base.y() - s*base.z();
+			quat.z() = c*base.z() + s*base.y();
+			quat.w() = c*base.w() - s*base.x();
+		}
+
+		if (shoot_point_down_enabled(gem_num)) gem_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_TRIANGLE;
+		// The virtual Square slot carries this gesture rather than a game button.
+		if (shoot_spin_enabled(gem_num)) gem_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_SQUARE;
+		u64& previous_time = gem.mouse_orientation_time[gem_num];
+		auto& previous = gem.mouse_previous_orientation[gem_num];
+		if (previous_time == 0 || now < previous_time || now - previous_time >= 1000)
+		{
+			move_data.gyro = {};
+			if (previous_time != 0 && now > previous_time && now - previous_time <= 100'000)
+			{
+				// conjugate(previous) * current: rotation in the controller's frame.
+				const f32 dx = previous.w()*quat.x() - previous.x()*quat.w() - previous.y()*quat.z() + previous.z()*quat.y();
+				const f32 dy = previous.w()*quat.y() + previous.x()*quat.z() - previous.y()*quat.w() - previous.z()*quat.x();
+				const f32 dz = previous.w()*quat.z() - previous.x()*quat.y() + previous.y()*quat.x() - previous.z()*quat.w();
+				const f32 dw = previous.w()*quat.w() + previous.x()*quat.x() + previous.y()*quat.y() + previous.z()*quat.z();
+				const f32 length = std::sqrt(dx*dx + dy*dy + dz*dz);
+				if (length > 0.000001f)
+				{
+					const f32 scale = 2.0f * std::atan2(length, std::abs(dw)) / length * (1'000'000.0f / (now - previous_time)) * (dw < 0.0f ? -1.0f : 1.0f);
+					move_data.gyro = ps_move_data::vect<3>({dx*scale, dy*scale, dz*scale});
+				}
+			}
+			previous = quat;
+			previous_time = now;
+		}
+		const ps_move_data::vect<4> inverse({-quat.x(), -quat.y(), -quat.z(), quat.w()});
+		move_data.accelerometer = ps_move_data::rotate_vector(inverse, ps_move_data::vect<3>({0.f, 0.f, 1.f}));
+		move_data.angvel_world = ps_move_data::rotate_vector(quat, move_data.gyro);
+		for (u32 i = 0; i < 3; i++) gem_state->angvel[i] = move_data.angvel_world[i];
 	}
 
 	gem_state->quat[0] = quat.x();
@@ -2557,7 +2697,7 @@ static bool mouse_input_to_pad(u32 mouse_no, be_t<u16>& digital_buttons, be_t<u1
 
 	const Mouse& mouse_data = ::at32(handler.GetMice(), mouse_no);
 
-	if (gem_v032_mouse())
+	if (gem_v032_buttons())
 	{
 		// v0.0.32 layout and combos
 		const auto is_pressed = [&mouse_data](MouseButtonCodes button) -> bool { return !!(mouse_data.buttons & button); };
@@ -2753,11 +2893,13 @@ static void mouse_pos_to_gem_state(u32 mouse_no, gem_config::gem_controller& con
 		}
 
 		ps_move_data& move_data = ::at32(g_fxo->get<gem_config>().fake_move_data, mouse_no);
-		pos_to_gem_state(mouse_no, controller, gem_state, mouse.x_pos, mouse.y_pos, move_data);
+		const auto [aim_x, aim_y] = mlgb_aim(mouse_no, mouse.x_pos, mouse.y_pos);
+		pos_to_gem_state(mouse_no, controller, gem_state, aim_x, aim_y, move_data);
 	}
 	else if constexpr (std::is_same_v<T, vm::ptr<CellGemImageState>>)
 	{
-		pos_to_gem_image_state(mouse_no, controller, gem_state, mouse.x_pos, mouse.y_pos);
+		const auto [aim_x, aim_y] = mlgb_aim(mouse_no, mouse.x_pos, mouse.y_pos);
+		pos_to_gem_image_state(mouse_no, controller, gem_state, aim_x, aim_y);
 	}
 }
 
@@ -3414,6 +3556,19 @@ error_code cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, v
 		case move_handler::mouse:
 		case move_handler::raw_mouse:
 			mouse_input_to_pad(gem_num, inertial_state->pad.digitalbuttons, inertial_state->pad.analog_T);
+			// MLGB lightgun fork: The Shoot reads gravity and gyro from the inertial state
+			if (gem_mlgb_title() && Emu.GetTitleID() == "BCUS98222")
+			{
+				std::lock_guard history_lock(gem.mouse_history_mutex);
+				const auto& data = gem.fake_move_data[gem_num];
+				if (shoot_spin_enabled(gem_num)) inertial_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_SQUARE;
+				if (shoot_point_down_enabled(gem_num)) inertial_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_TRIANGLE;
+				for (u32 i = 0; i < 3; i++)
+				{
+					inertial_state->accelerometer[i] = data.accelerometer[i];
+					inertial_state->gyro[i] = get_guest_system_time() - gem.mouse_orientation_time[gem_num] <= 100'000 ? data.gyro[i] : 0.f;
+				}
+			}
 			break;
 #ifdef HAVE_LIBEVDEV
 		case move_handler::gun:
@@ -3676,6 +3831,45 @@ static error_code cellGemGetState_inner(u32 gem_num, u32 flag, u64 time_paramete
 	if (!controller.hue_set)
 	{
 		return CELL_GEM_HUE_NOT_SET;
+	}
+
+	// MLGB lightgun fork: The Shoot compares timestamped samples. Returning the live state for every
+	// historical request discards motion and button transitions between samples.
+	if (gem_mlgb_title() && Emu.GetTitleID() == "BCUS98222")
+	{
+		std::lock_guard history_lock(gem.mouse_history_mutex);
+		if (gem.mouse_history_epoch != gem.start_timestamp_us)
+		{
+			for (auto& samples : gem.mouse_history) samples.clear();
+			gem.mouse_history_epoch = gem.start_timestamp_us;
+		}
+
+		auto& samples = gem.mouse_history[gem_num];
+		const u64 now = gem_state->timestamp;
+		if (!samples.empty() && now < static_cast<u64>(samples.back().timestamp)) samples.clear();
+		if (samples.empty() || now - static_cast<u64>(samples.back().timestamp) >= 1000)
+		{
+			samples.push_back(*gem_state);
+			if (samples.size() > 512) samples.pop_front();
+		}
+
+		if (flag == CELL_GEM_STATE_FLAG_TIMESTAMP ||
+			(flag == CELL_GEM_STATE_FLAG_CURRENT_TIME && static_cast<s64>(time_parameter) < 0))
+		{
+			const s64 requested = flag == CELL_GEM_STATE_FLAG_TIMESTAMP
+				? static_cast<s64>(time_parameter) : static_cast<s64>(now) + static_cast<s64>(time_parameter);
+			if (requested < 0 || samples.empty() || static_cast<u64>(requested) < static_cast<u64>(samples.front().timestamp))
+				return CELL_GEM_TIME_OUT_OF_RANGE;
+
+			for (auto sample = samples.rbegin(); sample != samples.rend(); ++sample)
+			{
+				if (static_cast<u64>(sample->timestamp) <= static_cast<u64>(requested))
+				{
+					*gem_state = *sample;
+					break;
+				}
+			}
+		}
 	}
 
 	return CELL_OK;
