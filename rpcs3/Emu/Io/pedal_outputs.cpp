@@ -10,6 +10,8 @@
 #include "Emu/System.h"
 #include "Emu/system_utils.hpp"
 #include "Emu/Memory/vm.h"
+#include "Emu/Io/MouseHandler.h"
+#include "Emu/IdManager.h"
 #include "Utilities/File.h"
 #include "Utilities/StrUtil.h"
 #include "Emu/RSX/Overlays/overlay_message.h"
@@ -42,6 +44,8 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   Match = timecrisis4.self         ; text in the running game's executable path or title ID
 //                                    ; (several allowed, separated by commas)
 //   Debug = 1                        ; optional: write every value change to RPCS3.log
+//   Capture = 1                      ; optional: memory snapshot after every trigger pull (for finding addresses;
+//                                    ; files are named ..._P1shot / _P2shot). Remove when done.
 //
 //   [Outputs]
 //   P1_Ammo = u8 0x00A1B2C3          ; plain address
@@ -92,6 +96,7 @@ namespace
 		std::string rom;
 		std::vector<std::string> match;
 		bool debug = false;
+		bool capture = false;      // Capture = 1: memory snapshot automatically after every gun trigger pull (finding addresses)
 		std::vector<u8> find;      // Find = bytes (hex) the game keeps next to its values; outputs with @ addresses follow it
 		u32 find_lo = 0x30000000;  // FindIn = <start> <end> (default 0x30000000 0x40000000)
 		u32 find_hi = 0x40000000;
@@ -225,6 +230,7 @@ namespace
 						}
 					}
 					else if (lower(key) == "debug") game.debug = val == "1" || lower(val) == "true";
+					else if (lower(key) == "capture") game.capture = val == "1" || lower(val) == "true";
 					else if (lower(key) == "find")
 					{
 						std::string hex;
@@ -617,14 +623,55 @@ namespace
 
 		int dump_count = 0;
 
-		void dump_memory()
+		// Capture mode: trigger pulls seen on each gun, and when to take the snapshot
+		u8 last_triggers = 0;
+		clock_type::time_point capture_at{};
+		std::string capture_tag;
+
+		void check_capture()
+		{
+			if (!active || !active->capture || !Emu.IsRunning()) return;
+
+			u8 triggers = 0;
+			if (auto* handler = g_fxo->try_get<MouseHandlerBase>())
+			{
+				std::lock_guard lock(handler->mutex);
+				const auto& mice = handler->GetMice();
+				for (usz i = 0; i < mice.size() && i < 4; i++)
+				{
+					if (mice[i].buttons & CELL_MOUSE_BUTTON_1) triggers |= static_cast<u8>(1u << i);
+				}
+			}
+
+			const u8 pressed = triggers & ~last_triggers;
+			last_triggers = triggers;
+			const auto now = clock_type::now();
+
+			if (pressed && capture_at == clock_type::time_point{})
+			{
+				for (u32 i = 0; i < 4; i++)
+				{
+					if (pressed & (1u << i)) { capture_tag = "_P" + std::to_string(i + 1) + "shot"; break; }
+				}
+				// a moment after the shot, so the game has counted it
+				capture_at = now + std::chrono::milliseconds(400);
+			}
+
+			if (capture_at != clock_type::time_point{} && now >= capture_at)
+			{
+				capture_at = {};
+				dump_memory(capture_tag);
+			}
+		}
+
+		void dump_memory(const std::string& tag = {})
 		{
 			if (Emu.IsStopped()) return;
 
 			const std::string dir = rpcs3::utils::get_emu_dir() + "outputs/dumps/";
 			fs::create_path(dir);
 
-			const std::string base = (active ? active->rom : Emu.GetTitleID()) + "_" + std::to_string(++dump_count);
+			const std::string base = (active ? active->rom : Emu.GetTitleID()) + "_" + std::to_string(++dump_count) + tag;
 			const std::string path = dir + base + ".dump.zst";
 			fs::file f(path, fs::rewrite);
 			if (!f)
@@ -681,6 +728,7 @@ namespace
 				check_game();
 				poll_values();
 				run_pulses();
+				check_capture();
 
 				// F10 = memory snapshot (for finding ammo / life addresses)
 				if ((GetAsyncKeyState(VK_F10) & 1) && Emu.IsRunning())
