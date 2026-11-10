@@ -48,7 +48,8 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   AmmoNeedsLife = 1                ; optional: Pn_Ammo is sent as 0 while Pn_Life is 0 (player not in the game)
 //   Pn_Playing = <address>           ; optional output: 0 = player not in the game -> Pn_Ammo and Pn_Life are sent as 0
 //   KickWhen = ShootFlag 1           ; optional: recoil kicks only while output ShootFlag is 1
-//   HoldWhen = ShootFlag 0           ; optional: while ShootFlag is 0, holding a gun's trigger sends Pn_Hold 1/0 every 100 ms
+//   HoldWhen = ShootFlag 0           ; optional: while ShootFlag is 0, holding a gun's trigger (at least half a second)
+//                                    ; sends Pn_Hold 1/0 every 100 ms
 //   Capture = 1                      ; optional: memory snapshot after every trigger pull (for finding addresses;
 //                                    ; files are named ..._P1shot / _P2shot). Remove when done.
 //
@@ -505,6 +506,7 @@ namespace
 			found = 0;
 			hold_state = {};
 			hold_next = {};
+			hold_start = {};
 			have.clear();
 			pulses.clear();
 		}
@@ -695,6 +697,7 @@ namespace
 		}
 
 		std::array<clock_type::time_point, 4> hold_next{};
+		std::array<clock_type::time_point, 4> hold_start{}; // when the trigger was pressed (0 = not held)
 		std::array<int, 4> hold_state{};
 
 		void update_hold(clock_type::time_point now)
@@ -708,7 +711,17 @@ namespace
 			for (u32 i = 0; i < 4; i++)
 			{
 				const std::string name = "P" + std::to_string(i + 1) + "_Hold";
-				if (triggers & (1u << i))
+				if (!(triggers & (1u << i)))
+				{
+					hold_start[i] = {};
+				}
+				else if (hold_start[i] == clock_type::time_point{})
+				{
+					hold_start[i] = now;
+				}
+
+				// only a real hold counts (half a second) - quick trigger pulls in menus never send Pn_Hold
+				if ((triggers & (1u << i)) && now - hold_start[i] >= std::chrono::milliseconds(500))
 				{
 					if (now >= hold_next[i])
 					{
