@@ -52,6 +52,14 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   HoldWhen = ShootFlag 0           ; optional: while ShootFlag is 0 (or a range, like KickWhen), holding a gun's trigger
 //                                    ; (at least HoldDelay ms) sends Pn_Hold 1/0 every 100 ms
 //   HoldDelay = 500                  ; optional: how long the trigger must be held before Pn_Hold starts (0 - 5000 ms)
+//   HoldWhen = WheelTimer 1-1000 changing ; "changing": only while that value is also still changing (a countdown
+//                                    ; that stops partway when the wheel ends early)
+//   PlayingLatch = 1                 ; optional: once Pn_Playing has been on, keep showing life/ammo (no LED "death"
+//                                    ; flash when a stage ends and the game sets Pn_Playing back to 0)
+//   TriggerStart = 1                 ; optional: while a player is in the stage (Pn_Playing not 0) but has no life
+//                                    ; (continue screen, or Player 2 not joined yet), the trigger also presses Start
+//   DamagePause = 300                ; optional: no recoil kicks for that player this long after Pn_Damaged, so the
+//                                    ; damage rumble is not cut off by the next kick (0 - 2000 ms)
 //   TriggerRecoil = 125              ; optional, unlimited auto-fire games: kick on every trigger pull and every 125 ms
 //                                    ; while held (only while KickWhen allows and that player's Pn_Life > 0)
 //   Capture = 1                      ; optional: memory snapshot after every trigger pull (for finding addresses;
@@ -114,6 +122,10 @@ namespace
 		s64 hold_when_value = 0;   //   (1/0 every 100 ms, e.g. rumble while turning a wheel); value or range <lo>-<hi>
 		s64 hold_when_hi = 0;
 		int hold_delay_ms = 500;   // HoldDelay = <ms>: trigger held this long before Pn_Hold starts
+		bool hold_changing = false; // HoldWhen ... changing: the value must also still be changing
+		bool playing_latch = false; // PlayingLatch = 1: Pn_Playing only gates until it has been on once
+		bool trigger_start = false; // TriggerStart = 1: trigger = Start while in the stage with no life (continue)
+		int damage_pause_ms = 0;    // DamagePause = <ms>: no kicks for a player this long after Pn_Damaged
 		bool ammo_needs_life = false; // AmmoNeedsLife = 1: Pn_Ammo is sent as 0 while Pn_Life is 0 (player not playing)
 		int trigger_recoil_ms = 0;  // TriggerRecoil = <ms>: games with unlimited auto-fire - kick on every trigger pull and
 		                            //   every <ms> while it is held (only while KickWhen allows and the player's life > 0)
@@ -131,6 +143,7 @@ namespace
 	};
 
 	std::atomic<bool> g_stop{false};
+	std::array<std::atomic<bool>, 4> g_trigger_start{}; // TriggerStart: read by cellGem
 	std::thread g_thread;
 	std::once_flag g_once;
 
@@ -258,6 +271,14 @@ namespace
 						if (parse_number(val, ms) && ms >= 40 && ms <= 2000) game.trigger_recoil_ms = static_cast<int>(ms);
 						else outputs_log.error("%s: TriggerRecoil must be 40 - 2000 (ms)", entry.name);
 					}
+					else if (lower(key) == "playinglatch") game.playing_latch = val == "1" || lower(val) == "true";
+					else if (lower(key) == "triggerstart") game.trigger_start = val == "1" || lower(val) == "true";
+					else if (lower(key) == "damagepause")
+					{
+						s64 ms = 0;
+						if (parse_number(val, ms) && ms >= 0 && ms <= 2000) game.damage_pause_ms = static_cast<int>(ms);
+						else outputs_log.error("%s: DamagePause must be 0 - 2000 (ms)", entry.name);
+					}
 					else if (lower(key) == "holddelay")
 					{
 						s64 ms = 0;
@@ -266,7 +287,9 @@ namespace
 					}
 					else if (lower(key) == "kickwhen" || lower(key) == "holdwhen")
 					{
-						const auto r = fmt::split(val, {" ", "\t"});
+						auto r = fmt::split(val, {" ", "\t"});
+						const bool changing = r.size() == 3 && lower(r[2]) == "changing";
+						if (changing) r.pop_back();
 						s64 lo = 0, hi = 0;
 						bool ok = r.size() == 2;
 						if (ok)
@@ -284,6 +307,7 @@ namespace
 							(kick ? game.kick_when : game.hold_when) = r[0];
 							(kick ? game.kick_when_value : game.hold_when_value) = lo;
 							(kick ? game.kick_when_hi : game.hold_when_hi) = hi;
+							if (!kick) game.hold_changing = changing;
 						}
 						else outputs_log.error("%s: could not read '%s = %s'", entry.name, key, val);
 					}
@@ -542,6 +566,10 @@ namespace
 			hold_start = {};
 			trigger_was_held = {};
 			trigger_needs_release = {};
+			damage_until = {};
+			playing_seen = {};
+			hold_seen = false;
+			for (auto& t : g_trigger_start) t = false;
 			trigger_next_kick = {};
 			have.clear();
 			pulses.clear();
@@ -589,6 +617,39 @@ namespace
 			{
 				outputs_log.notice("Game started: %s (%s, %d outputs)", active->rom, active->file, active->outputs.size());
 				broadcast(fmt::format("mame_start = %s\r", active->rom));
+			}
+		}
+
+		std::array<clock_type::time_point, 4> damage_until{};
+		std::array<bool, 4> playing_seen{};
+
+		static u32 player_index(const std::string& prefix)
+		{
+			return prefix.size() >= 2 && (prefix[0] == 'P' || prefix[0] == 'p') && prefix[1] >= '1' && prefix[1] <= '4' ? static_cast<u32>(prefix[1] - '1') : 4u;
+		}
+
+		// remove waiting pulses of an output (a 1 already sent still gets its 0)
+		void drop_pulses(const std::string& name, clock_type::time_point now)
+		{
+			bool on = values.contains(name) && values[name] == 1;
+			std::erase_if(pulses, [&](const pulse& p) { return p.name == name && p.when > now; });
+			if (on) pulses.push_back({name, now + std::chrono::milliseconds(40), 0});
+		}
+
+		// TriggerStart: player in the stage (Pn_Playing not 0) with no life -> the trigger also presses Start
+		void update_trigger_start()
+		{
+			for (u32 i = 0; i < 4; i++)
+			{
+				bool on = false;
+				if (active && active->trigger_start)
+				{
+					const std::string p = "p" + std::to_string(i + 1) + "_";
+					const s64* playing = raw_value(p + "playing");
+					const s64* life = raw_value(p + "life");
+					on = playing && *playing != 0 && life && *life <= 0;
+				}
+				g_trigger_start[i] = on;
 			}
 		}
 
@@ -663,17 +724,25 @@ namespace
 				// If a player has any of those, plain P1_Ammo is only the number shown (no kick from it).
 				const bool ammo_kicks = what.starts_with("ammo_") || (what == "ammo" && !active_has(lower(prefix) + "ammo_"));
 
-				if (ammo_kicks && v < old && old - v <= 5 && kick_allowed())
+				const bool paused = player_index(prefix) < 4 && now < damage_until[player_index(prefix)];
+
+				if (ammo_kicks && v < old && old - v <= 5 && kick_allowed() && !paused)
 				{
 					add_pulses(o.kick.empty() ? prefix + "CtmRecoil" : o.kick, static_cast<int>(old - v), now, o.kick_ms, 40);
 				}
-				else if (what == "shots" && v > old && v - old <= 5 && kick_allowed())
+				else if (what == "shots" && v > old && v - old <= 5 && kick_allowed() && !paused)
 				{
 					add_pulses(o.kick.empty() ? prefix + "CtmRecoil" : o.kick, static_cast<int>(v - old), now, o.kick_ms, 40);
 				}
 				else if (what == "life" && v < old)
 				{
 					add_pulses(prefix + (v > 0 ? "Damaged" : "Death"), 1, now, 150, 0);
+					if (const u32 pi = player_index(prefix); pi < 4 && v > 0)
+					{
+						damage_until[pi] = now + std::chrono::milliseconds(active->damage_pause_ms);
+						// drop kicks already waiting so the rumble gets through
+						if (active->damage_pause_ms > 0) drop_pulses(prefix + "CtmRecoil", now);
+					}
 				}
 			}
 
@@ -687,7 +756,10 @@ namespace
 				// Pn_Playing (if the game file has it): 0 = player not in the game -> ammo and life shown as 0
 				if (const s64* playing = raw_value(lower(prefix) + "playing"))
 				{
-					set(o.name, *playing != 0 ? a->second : 0);
+					const u32 pi = player_index(prefix);
+					if (pi < 4 && *playing != 0) playing_seen[pi] = true;
+					const bool shown = *playing != 0 || (active->playing_latch && pi < 4 && playing_seen[pi]);
+					set(o.name, shown ? a->second : 0);
 				}
 				else if (active->ammo_needs_life && what == "ammo")
 				{
@@ -698,6 +770,7 @@ namespace
 
 			update_hold(now);
 			update_trigger_recoil(now);
+			update_trigger_start();
 		}
 
 		std::array<bool, 4> trigger_was_held{};
@@ -716,7 +789,7 @@ namespace
 				const std::string prefix = "P" + std::to_string(i + 1) + "_";
 				const bool held = (triggers & (1u << i)) != 0;
 				const s64* life = raw_value(lower(prefix) + "life");
-				const bool allowed = state_ok && (!life || *life > 0);
+				const bool allowed = state_ok && (!life || *life > 0) && now >= damage_until[i];
 
 				// a pull that started while kicks were not allowed (e.g. still holding from the wheel) never kicks -
 				// the player has to let go and pull again. Short blips during a pull that started in play are fine.
@@ -769,13 +842,24 @@ namespace
 		std::array<clock_type::time_point, 4> hold_next{};
 		std::array<clock_type::time_point, 4> hold_start{}; // when the trigger was pressed (0 = not held)
 		std::array<int, 4> hold_state{};
+		bool hold_seen = false;
+		s64 hold_last_value = 0;
+		clock_type::time_point hold_last_change{};
 
 		void update_hold(clock_type::time_point now)
 		{
 			if (active->hold_when.empty()) return;
 
 			const s64* flag = raw_value(lower(active->hold_when));
-			const bool mode = flag && *flag >= active->hold_when_value && *flag <= active->hold_when_hi;
+			bool mode = flag && *flag >= active->hold_when_value && *flag <= active->hold_when_hi;
+			if (flag && (!hold_seen || *flag != hold_last_value))
+			{
+				hold_seen = true;
+				hold_last_value = *flag;
+				hold_last_change = now;
+			}
+			// "changing": only while the value moved in the last 300 ms (a countdown that is still running)
+			if (active->hold_changing && now - hold_last_change > std::chrono::milliseconds(300)) mode = false;
 			const u8 triggers = mode ? read_triggers() : 0;
 
 			for (u32 i = 0; i < 4; i++)
@@ -947,6 +1031,11 @@ namespace
 
 namespace pedal_outputs
 {
+	bool trigger_is_start(u32 player)
+	{
+		return player < 4 && g_trigger_start[player].load();
+	}
+
 	void start()
 	{
 		std::call_once(g_once, []()
@@ -979,6 +1068,7 @@ namespace pedal_outputs
 namespace pedal_outputs
 {
 	void start() {}
+	bool trigger_is_start(u32) { return false; }
 }
 
 #endif

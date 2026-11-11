@@ -11,6 +11,9 @@ namespace pedal_outputs
 {
 	// Starts the outputs server once (only if the outputs folder has at least one .ini file).
 	void start();
+
+	// TriggerStart (outputs file): true while this player's trigger should also press Start (continue screen)
+	bool trigger_is_start(unsigned int player);
 }
 
 // Pedal build: per-game profiles.

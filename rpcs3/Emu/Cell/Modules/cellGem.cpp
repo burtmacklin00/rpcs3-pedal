@@ -12,6 +12,7 @@
 #include "Emu/Io/interception.h"
 #include "Emu/system_config.h"
 #include "Emu/System.h"
+#include "Emu/Io/pedal_outputs.h"
 #include "Emu/IdManager.h"
 #include "Emu/RSX/Overlays/overlay_cursor.h"
 #include "Input/pad_thread.h"
@@ -3496,7 +3497,7 @@ error_code cellGemGetImageState(u32 gem_num, vm::ptr<CellGemImageState> gem_imag
 
 error_code cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, vm::ptr<CellGemInertialState> inertial_state)
 {
-	cellGem.warning("cellGemGetInertialState(gem_num=%d, state_flag=%d, timestamp=0x%x, inertial_state=0x%x)", gem_num, state_flag, timestamp, inertial_state);
+	cellGem.trace("cellGemGetInertialState(gem_num=%d, state_flag=%d, timestamp=0x%x, inertial_state=0x%x)", gem_num, state_flag, timestamp, inertial_state);
 
 	auto& gem = g_fxo->get<gem_config>();
 
@@ -3564,6 +3565,11 @@ error_code cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, v
 		case move_handler::mouse:
 		case move_handler::raw_mouse:
 			mouse_input_to_pad(gem_num, inertial_state->pad.digitalbuttons, inertial_state->pad.analog_T);
+			// Pedal build: TriggerStart (outputs file) - on a continue screen the trigger also presses Start
+			if ((+inertial_state->pad.digitalbuttons & CELL_GEM_CTRL_T) && pedal_outputs::trigger_is_start(gem_num))
+			{
+				inertial_state->pad.digitalbuttons = static_cast<u16>(+inertial_state->pad.digitalbuttons | CELL_GEM_CTRL_START);
+			}
 			// MLGB lightgun fork: The Shoot reads gravity and gyro from the inertial state
 			if (gem_mlgb_title() && Emu.GetTitleID() == "BCUS98222")
 			{
@@ -3720,7 +3726,7 @@ error_code cellGemGetRumble(u32 gem_num, vm::ptr<u8> rumble)
 
 static error_code cellGemGetState_inner(u32 gem_num, u32 flag, u64 time_parameter, vm::ptr<CellGemState> gem_state)
 {
-	cellGem.warning("cellGemGetState(gem_num=%d, flag=0x%x, time=0x%llx, gem_state=*0x%x)", gem_num, flag, time_parameter, gem_state);
+	cellGem.trace("cellGemGetState(gem_num=%d, flag=0x%x, time=0x%llx, gem_state=*0x%x)", gem_num, flag, time_parameter, gem_state);
 
 	auto& gem = g_fxo->get<gem_config>();
 
@@ -3808,6 +3814,11 @@ static error_code cellGemGetState_inner(u32 gem_num, u32 flag, u64 time_paramete
 		case move_handler::mouse:
 		case move_handler::raw_mouse:
 			mouse_input_to_pad(gem_num, gem_state->pad.digitalbuttons, gem_state->pad.analog_T);
+			// Pedal build: TriggerStart (outputs file) - on a continue screen the trigger also presses Start
+			if ((+gem_state->pad.digitalbuttons & CELL_GEM_CTRL_T) && pedal_outputs::trigger_is_start(gem_num))
+			{
+				gem_state->pad.digitalbuttons = static_cast<u16>(+gem_state->pad.digitalbuttons | CELL_GEM_CTRL_START);
+			}
 			mouse_pos_to_gem_state(gem_num, controller, gem_state);
 			break;
 #ifdef HAVE_LIBEVDEV
