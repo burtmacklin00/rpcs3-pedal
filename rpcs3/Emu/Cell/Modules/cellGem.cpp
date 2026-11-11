@@ -4618,63 +4618,20 @@ error_code cellGemWriteExternalPort(u32 gem_num, vm::ptr<u8[CELL_GEM_EXTERNAL_PO
 	return CELL_OK;
 }
 
-// ---- Pedal build TEST: log what the game reads for each gun (only when it changes) ----
+// Pedal build: thin wrappers kept (the test logging that used to live here is removed)
 error_code cellGemGetState(u32 gem_num, u32 flag, u64 time_parameter, vm::ptr<CellGemState> gem_state)
 {
-	const error_code ret = cellGemGetState_inner(gem_num, flag, time_parameter, gem_state);
-
-	if (gem_num < 2 && gem_state)
-	{
-		struct last_t { s32 ret = -1; u32 tf = 0xffffffff; u16 btn = 0xffff; s32 x = 1 << 30, y = 1 << 30; };
-		static last_t last[2][4]{};
-		last_t& l = last[gem_num][flag & 3];
-		const s32 r = static_cast<s32>(+ret);
-		const u32 tf = gem_state->tracking_flags;
-		const u16 btn = gem_state->pad.digitalbuttons;
-		const s32 x = static_cast<s32>(gem_state->pos[0]);
-		const s32 y = static_cast<s32>(gem_state->pos[1]);
-		if (r != l.ret || tf != l.tf || btn != l.btn || std::abs(x - l.x) > 40 || std::abs(y - l.y) > 40)
-		{
-			cellGem.notice("TEST GetState gem%d flag=%d ret=0x%x tracking=0x%x buttons=0x%04x T=%d pos=(%.0f, %.0f, %.0f) quat=(%.1f, %.1f, %.1f, %.1f) handle=(%.0f, %.0f, %.0f) ext=0x%x",
-				gem_num, flag, r, tf, btn, +gem_state->pad.analog_T, +gem_state->pos[0], +gem_state->pos[1], +gem_state->pos[2],
-				+gem_state->quat[0], +gem_state->quat[1], +gem_state->quat[2], +gem_state->quat[3],
-				+gem_state->handle_pos[0], +gem_state->handle_pos[1], +gem_state->handle_pos[2], +gem_state->ext.status);
-			l = { r, tf, btn, x, y };
-		}
-	}
-	return ret;
+	return cellGemGetState_inner(gem_num, flag, time_parameter, gem_state);
 }
 
 error_code cellGemGetInfo(vm::ptr<CellGemInfo> info)
 {
-	const error_code ret = cellGemGetInfo_inner(info);
-	if (info)
-	{
-		static std::string last;
-		const std::string now = fmt::format("ret=0x%x max=%d now=%d status=[%d %d %d %d] port=[%d %d %d %d]", static_cast<s32>(+ret), +info->max_connect, +info->now_connect,
-			+info->status[0], +info->status[1], +info->status[2], +info->status[3], +info->port[0], +info->port[1], +info->port[2], +info->port[3]);
-		if (now != last)
-		{
-			cellGem.notice("TEST GetInfo %s", now);
-			last = now;
-		}
-	}
-	return ret;
+	return cellGemGetInfo_inner(info);
 }
 
 error_code cellGemGetStatusFlags(u32 gem_num, vm::ptr<u64> flags)
 {
-	const error_code ret = cellGemGetStatusFlags_inner(gem_num, flags);
-	if (gem_num < 4 && flags)
-	{
-		static u64 last[4] = { ~0ull, ~0ull, ~0ull, ~0ull };
-		if (*flags != last[gem_num])
-		{
-			cellGem.notice("TEST GetStatusFlags gem%d ret=0x%x flags=0x%llx", gem_num, static_cast<s32>(+ret), +*flags);
-			last[gem_num] = *flags;
-		}
-	}
-	return ret;
+	return cellGemGetStatusFlags_inner(gem_num, flags);
 }
 
 DECLARE(ppu_module_manager::cellGem)("libgem", []()

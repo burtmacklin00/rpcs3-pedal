@@ -349,8 +349,6 @@ void raw_mouse::update_values(s32 scan_code, bool pressed, u32 vkey)
 		else
 			m_keys_down.erase(vkey);
 
-		input_log.notice("TEST raw mouse player %d: key %d %s", m_index + 1, vkey, pressed ? "down" : "up");
-
 		for (const auto& [vk, btn] : m_key_binds)
 		{
 			if (vk == vkey)

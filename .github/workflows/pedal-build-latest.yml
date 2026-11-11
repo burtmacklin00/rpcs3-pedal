@@ -1,5 +1,6 @@
 # Pedal Config build of the latest RPCS3 (Windows), same steps as RPCS3's own Windows CI job
-# (rpcs3.yml "RPCS3 Windows"), minus ccache and their release upload.
+# (rpcs3.yml "RPCS3 Windows"), with their ccache (compile cache: later builds only recompile changed files),
+# minus their release upload.
 name: Pedal build latest (Windows)
 
 on:
@@ -29,6 +30,9 @@ jobs:
       CCACHE_SHA: '859141059ac950e1e8cd042c66f842f26b9e3a62a1669a69fe6ba180cb58bbdf'
       CCACHE_BIN_DIR: 'C:\ccache_bin'
       CCACHE_DIR: 'C:\ccache'
+      CCACHE_INODECACHE: 'true'
+      CCACHE_SLOPPINESS: 'time_macros'
+      CCACHE_MAXSIZE: '7G'
       DEPS_CACHE_DIR: ./dependency_cache
       SKIP_RPCS3_TEST: 'true'
     steps:
@@ -42,6 +46,22 @@ jobs:
 
       - name: Restore NuGet packages
         run: nuget restore rpcs3.sln
+
+      - name: Restore build ccache
+        uses: actions/cache/restore@v4
+        id: restore-build-ccache
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: "${{ runner.os }}-ccache-${{ env.COMPILER }}-${{ github.run_id }}"
+          restore-keys: ${{ runner.os }}-ccache-${{ env.COMPILER }}-
+
+      - name: Restore dependencies cache
+        uses: actions/cache/restore@v4
+        id: restore-dependencies-cache
+        with:
+          path: ${{ env.DEPS_CACHE_DIR }}
+          key: "${{ runner.os }}-${{ env.COMPILER }}-${{ env.QT_VER }}-${{ env.VULKAN_SDK_SHA }}-${{ env.CCACHE_SHA }}-${{ hashFiles('llvm.lock') }}"
+          restore-keys: ${{ runner.os }}-${{ env.COMPILER }}-
 
       - name: Setup env
         shell: pwsh
@@ -73,7 +93,7 @@ jobs:
         env:
           BUILD_REPOSITORY_NAME: ''
           BUILD_SOURCEBRANCHNAME: ''
-        run: msbuild rpcs3.sln /p:Configuration=Release /v:minimal /p:Platform=x64 /p:PreferredToolArchitecture=x64 /p:UseMultiToolTask=true /p:CustomAfterMicrosoftCommonTargets="${{ github.workspace }}\buildfiles\msvc\ci_only.targets"
+        run: msbuild rpcs3.sln /p:Configuration=Release /v:minimal /p:Platform=x64 /p:PreferredToolArchitecture=x64 /p:CLToolPath=${{ env.CCACHE_BIN_DIR }} /p:UseMultiToolTask=true /p:CustomAfterMicrosoftCommonTargets="${{ github.workspace }}\buildfiles\msvc\ci_only.targets"
 
       - name: Pack up build artifacts
         shell: bash
@@ -96,3 +116,22 @@ jobs:
           path: ${{ env.BUILD_ARTIFACTSTAGINGDIRECTORY }}
           compression-level: 0
           if-no-files-found: error
+
+      - name: Show ccache stats
+        if: always()
+        shell: bash
+        run: '"$(cygpath -u "$CCACHE_BIN_DIR")"/ccache.exe --show-stats || true'
+
+      - name: Save build ccache
+        if: always() && steps.restore-build-ccache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.restore-build-ccache.outputs.cache-primary-key }}
+
+      - name: Save dependencies cache
+        if: always() && steps.restore-dependencies-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DEPS_CACHE_DIR }}
+          key: ${{ steps.restore-dependencies-cache.outputs.cache-primary-key }}
