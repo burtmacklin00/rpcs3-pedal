@@ -14,6 +14,10 @@ namespace pedal_outputs
 
 	// TriggerStart (outputs file): true while this player's trigger should also press Start (continue screen)
 	bool trigger_is_start(unsigned int player);
+
+	// MenuAim (outputs file, test): in menus, gun 1 aim + trigger drive the pad (directions, Cross) and show a crosshair
+	bool menu_aim_active();
+	void menu_aim_buttons(unsigned short& digital1, unsigned short& digital2);
 }
 
 // Pedal build: per-game profiles.

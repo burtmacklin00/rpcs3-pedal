@@ -8,6 +8,7 @@
 #include "Input/pad_thread.h"
 #include "Input/product_info.h"
 #include "cellPad.h"
+#include "Emu/Io/pedal_outputs.h"
 
 error_code sys_config_start(ppu_thread& ppu);
 error_code sys_config_stop(ppu_thread& ppu);
@@ -507,6 +508,29 @@ void pad_get_data(u32 port_no, CellPadData* data, bool get_periph_data = false)
 				default:
 					break;
 				}
+			}
+		}
+
+		// Pedal build: MenuAim (outputs file, test) - in menus, gun 1 aim/trigger press directions and Cross on pad 1
+		if (port_no == 0)
+		{
+			u16 menu_d1 = 0, menu_d2 = 0;
+			pedal_outputs::menu_aim_buttons(menu_d1, menu_d2);
+			// take back what was added last time (in case a button is not mapped and the loop above never clears it)
+			static u16 last_d1 = 0, last_d2 = 0;
+			output.button[CELL_PAD_BTN_OFFSET_DIGITAL1] &= ~last_d1;
+			output.button[CELL_PAD_BTN_OFFSET_DIGITAL2] &= ~last_d2;
+			last_d1 = menu_d1;
+			last_d2 = menu_d2;
+			if (menu_d1 || menu_d2)
+			{
+				output.button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= menu_d1;
+				output.button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= menu_d2;
+				if (menu_d1 & CELL_PAD_CTRL_UP) set_value(output.button[CELL_PAD_BTN_OFFSET_PRESS_UP], 255);
+				if (menu_d1 & CELL_PAD_CTRL_DOWN) set_value(output.button[CELL_PAD_BTN_OFFSET_PRESS_DOWN], 255);
+				if (menu_d1 & CELL_PAD_CTRL_LEFT) set_value(output.button[CELL_PAD_BTN_OFFSET_PRESS_LEFT], 255);
+				if (menu_d1 & CELL_PAD_CTRL_RIGHT) set_value(output.button[CELL_PAD_BTN_OFFSET_PRESS_RIGHT], 255);
+				if (menu_d2 & CELL_PAD_CTRL_CROSS) set_value(output.button[CELL_PAD_BTN_OFFSET_PRESS_CROSS], 255);
 			}
 		}
 

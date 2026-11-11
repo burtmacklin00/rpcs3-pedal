@@ -1894,7 +1894,7 @@ static inline void pos_to_gem_image_state(u32 gem_num, gem_config::gem_controlle
 		controller.radius_valid = x_pos > 0.0f && x_pos < 1.0f && y_pos > 0.0f && y_pos < 1.0f;
 	}
 
-	if (g_cfg.io.show_move_cursor)
+	if (g_cfg.io.show_move_cursor || pedal_outputs::menu_aim_active())
 	{
 		draw_overlay_cursor(gem_num, controller, x_pos, y_pos);
 	}
@@ -2105,7 +2105,7 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 		controller.radius_valid = x_pos > 0.0f && x_pos < 1.0f && y_pos > 0.0f && y_pos < 1.0f;
 	}
 
-	if (g_cfg.io.show_move_cursor)
+	if (g_cfg.io.show_move_cursor || pedal_outputs::menu_aim_active())
 	{
 		draw_overlay_cursor(gem_num, controller, x_pos, y_pos);
 	}
@@ -2894,7 +2894,7 @@ static void mouse_pos_to_gem_state(u32 mouse_no, gem_config::gem_controller& con
 			gem_state->handle_pos[2] = old_distance + 10.f;
 			gem_state->handle_pos[3] = 0.f;
 
-			if (g_cfg.io.show_move_cursor)
+			if (g_cfg.io.show_move_cursor || pedal_outputs::menu_aim_active())
 			{
 				draw_overlay_cursor(mouse_no, controller, mouse.x_pos, mouse.y_pos);
 			}

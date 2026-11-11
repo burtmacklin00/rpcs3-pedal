@@ -11,6 +11,7 @@
 #include "Emu/system_utils.hpp"
 #include "Emu/Memory/vm.h"
 #include "Emu/Io/MouseHandler.h"
+#include "Emu/Io/pad_types.h"
 #include "Emu/IdManager.h"
 #include "Utilities/File.h"
 #include "Utilities/StrUtil.h"
@@ -61,6 +62,9 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //                                    ; presses Start once (then nothing for 2 s, so it can't pause the game)
 //   TriggerStart = 2                 ; the same, and also outside a stage (Pn_Playing 0: menus, skip screens, Player 2
 //                                    ; joining on the main menu) every new pull presses Start - not while HoldWhen is on
+//   MenuAim = P1_Playing 0           ; optional TEST: while that output has that value (a menu), gun 1 works the menu:
+//                                    ; aiming at the top/bottom/left/right edge presses up/down/left/right on the pad,
+//                                    ; the trigger presses Cross, and a crosshair is shown. Remove the line to turn it off.
 //   DamagePause = 300                ; optional: no recoil kicks for that player this long after Pn_Damaged, so the
 //                                    ; damage rumble is not cut off by the next kick (0 - 2000 ms)
 //   TriggerRecoil = 125              ; optional, unlimited auto-fire games: kick on every trigger pull and every 125 ms
@@ -130,6 +134,8 @@ namespace
 		bool playing_latch = false; // PlayingLatch = 1: Pn_Playing only gates until it has been on once
 		bool trigger_start_menus = false; // TriggerStart = 2: also outside a stage (menus, skip screens, joining)
 		bool trigger_start = false; // TriggerStart = 1: trigger = Start while in the stage with no life (continue)
+		std::string menu_when;      // MenuAim = <output> <value or lo-hi>: gun 1 drives the pad in menus (test)
+		s64 menu_lo = 0, menu_hi = 0;
 		int damage_pause_ms = 0;    // DamagePause = <ms>: no kicks for a player this long after Pn_Damaged
 		bool ammo_needs_life = false; // AmmoNeedsLife = 1: Pn_Ammo is sent as 0 while Pn_Life is 0 (player not playing)
 		int trigger_recoil_ms = 0;  // TriggerRecoil = <ms>: games with unlimited auto-fire - kick on every trigger pull and
@@ -149,6 +155,9 @@ namespace
 
 	std::atomic<bool> g_stop{false};
 	std::array<std::atomic<bool>, 4> g_trigger_start{}; // TriggerStart: read by cellGem
+	std::atomic<bool> g_menu_active{false};             // MenuAim: menu right now (read by cellGem for the crosshair)
+	std::atomic<u16> g_menu_d1{0};                      // MenuAim: pad digital1 bits to press (directions)
+	std::atomic<u16> g_menu_d2{0};                      // MenuAim: pad digital2 bits to press (Cross)
 	std::thread g_thread;
 	std::once_flag g_once;
 
@@ -275,6 +284,22 @@ namespace
 						s64 ms = 0;
 						if (parse_number(val, ms) && ms >= 40 && ms <= 2000) game.trigger_recoil_ms = static_cast<int>(ms);
 						else outputs_log.error("%s: TriggerRecoil must be 40 - 2000 (ms)", entry.name);
+					}
+					else if (lower(key) == "menuaim")
+					{
+						const auto r = fmt::split(val, {" ", "\t"});
+						s64 lo = 0, hi = 0;
+						bool ok = r.size() == 2;
+						if (ok)
+						{
+							const usz dash = r[1].find('-', 1);
+							if (dash != umax)
+								ok = parse_number(r[1].substr(0, dash), lo) && parse_number(r[1].substr(dash + 1), hi) && lo <= hi;
+							else
+								ok = parse_number(r[1], lo) && ((hi = lo), true);
+						}
+						if (ok) { game.menu_when = r[0]; game.menu_lo = lo; game.menu_hi = hi; }
+						else outputs_log.error("%s: could not read 'MenuAim = %s'", entry.name, val);
 					}
 					else if (lower(key) == "playinglatch") game.playing_latch = val == "1" || lower(val) == "true";
 					else if (lower(key) == "triggerstart")
@@ -583,6 +608,10 @@ namespace
 			ts_press_until = {};
 			ts_cooldown = {};
 			ts_last_triggers = 0;
+			g_menu_active = false;
+			g_menu_d1 = 0;
+			g_menu_d2 = 0;
+			menu_dir = 0;
 			trigger_next_kick = {};
 			have.clear();
 			pulses.clear();
@@ -695,6 +724,72 @@ namespace
 				g_trigger_start[i] = now < ts_press_until[i];
 			}
 			ts_last_triggers = triggers;
+		}
+
+		// MenuAim (test): gun 1 aimed at a screen edge = d-pad press (repeats while held there), trigger = Cross
+		u16 menu_dir = 0;
+		clock_type::time_point menu_next{};
+		clock_type::time_point menu_press_until{};
+		bool menu_first = true;
+
+		void update_menu_aim(clock_type::time_point now)
+		{
+			bool on = false;
+			if (active && !active->menu_when.empty())
+			{
+				const s64* v = raw_value(lower(active->menu_when));
+				on = v && *v >= active->menu_lo && *v <= active->menu_hi;
+			}
+			g_menu_active = on;
+			if (!on)
+			{
+				g_menu_d1 = 0;
+				g_menu_d2 = 0;
+				menu_dir = 0;
+				return;
+			}
+
+			f32 x = -1.f, y = -1.f;
+			u8 buttons = 0;
+			if (auto* handler = g_fxo->try_get<MouseHandlerBase>())
+			{
+				std::lock_guard lock(handler->mutex);
+				const auto& mice = handler->GetMice();
+				if (!mice.empty() && mice[0].x_max > 0 && mice[0].y_max > 0)
+				{
+					x = mice[0].x_pos;
+					y = mice[0].y_pos;
+					buttons = mice[0].buttons;
+				}
+			}
+
+			// 0 or 1 exactly = pointed off the screen: no direction
+			const bool on_screen = x > 0.001f && x < 0.999f && y > 0.001f && y < 0.999f;
+			u16 dir = 0;
+			if (on_screen)
+			{
+				if (y < 0.22f) dir = static_cast<u16>(CELL_PAD_CTRL_UP);
+				else if (y > 0.78f) dir = static_cast<u16>(CELL_PAD_CTRL_DOWN);
+				else if (x < 0.18f) dir = static_cast<u16>(CELL_PAD_CTRL_LEFT);
+				else if (x > 0.82f) dir = static_cast<u16>(CELL_PAD_CTRL_RIGHT);
+			}
+
+			if (dir != menu_dir)
+			{
+				menu_dir = dir;
+				menu_next = now;
+				menu_first = true;
+			}
+
+			if (dir && now >= menu_next)
+			{
+				menu_press_until = now + std::chrono::milliseconds(100);
+				menu_next = now + std::chrono::milliseconds(menu_first ? 500 : 300);
+				menu_first = false;
+			}
+
+			g_menu_d1 = (dir && now < menu_press_until) ? dir : 0;
+			g_menu_d2 = (buttons & CELL_MOUSE_BUTTON_1) ? static_cast<u16>(CELL_PAD_CTRL_CROSS) : 0;
 		}
 
 		void add_pulses(const std::string& name, int count, clock_type::time_point now, int length_ms, int gap_ms)
@@ -815,6 +910,7 @@ namespace
 			update_hold(now);
 			update_trigger_recoil(now);
 			update_trigger_start(now);
+			update_menu_aim(now);
 		}
 
 		std::array<bool, 4> trigger_was_held{};
@@ -1083,6 +1179,17 @@ namespace pedal_outputs
 		return player < 4 && g_trigger_start[player].load();
 	}
 
+	bool menu_aim_active()
+	{
+		return g_menu_active.load();
+	}
+
+	void menu_aim_buttons(u16& digital1, u16& digital2)
+	{
+		digital1 = g_menu_d1.load();
+		digital2 = g_menu_d2.load();
+	}
+
 	void start()
 	{
 		std::call_once(g_once, []()
@@ -1116,6 +1223,8 @@ namespace pedal_outputs
 {
 	void start() {}
 	bool trigger_is_start(u32) { return false; }
+	bool menu_aim_active() { return false; }
+	void menu_aim_buttons(u16& digital1, u16& digital2) { digital1 = 0; digital2 = 0; }
 }
 
 #endif
