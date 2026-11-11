@@ -50,6 +50,8 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   KickWhen = ShootFlag 1           ; optional: recoil kicks only while output ShootFlag is 1
 //   HoldWhen = ShootFlag 0           ; optional: while ShootFlag is 0, holding a gun's trigger (at least half a second)
 //                                    ; sends Pn_Hold 1/0 every 100 ms
+//   TriggerRecoil = 125              ; optional, unlimited auto-fire games: kick on every trigger pull and every 125 ms
+//                                    ; while held (only while KickWhen allows and that player's Pn_Life > 0)
 //   Capture = 1                      ; optional: memory snapshot after every trigger pull (for finding addresses;
 //                                    ; files are named ..._P1shot / _P2shot). Remove when done.
 //
@@ -108,6 +110,8 @@ namespace
 		std::string hold_when;     // HoldWhen = <output> <value>: while it has that value, holding a gun's trigger sends Pn_Hold
 		s64 hold_when_value = 0;   //   (1/0 every 100 ms, e.g. rumble while turning a wheel)
 		bool ammo_needs_life = false; // AmmoNeedsLife = 1: Pn_Ammo is sent as 0 while Pn_Life is 0 (player not playing)
+		int trigger_recoil_ms = 0;  // TriggerRecoil = <ms>: games with unlimited auto-fire - kick on every trigger pull and
+		                            //   every <ms> while it is held (only while KickWhen allows and the player's life > 0)
 		std::vector<u8> find;      // Find = bytes (hex) the game keeps next to its values; outputs with @ addresses follow it
 		u32 find_lo = 0x30000000;  // FindIn = <start> <end> (default 0x30000000 0x40000000)
 		u32 find_hi = 0x40000000;
@@ -243,6 +247,12 @@ namespace
 					else if (lower(key) == "debug") game.debug = val == "1" || lower(val) == "true";
 					else if (lower(key) == "capture") game.capture = val == "1" || lower(val) == "true";
 					else if (lower(key) == "ammoneedslife") game.ammo_needs_life = val == "1" || lower(val) == "true";
+					else if (lower(key) == "triggerrecoil")
+					{
+						s64 ms = 0;
+						if (parse_number(val, ms) && ms >= 40 && ms <= 2000) game.trigger_recoil_ms = static_cast<int>(ms);
+						else outputs_log.error("%s: TriggerRecoil must be 40 - 2000 (ms)", entry.name);
+					}
 					else if (lower(key) == "kickwhen" || lower(key) == "holdwhen")
 					{
 						const auto r = fmt::split(val, {" ", "\t"});
@@ -507,6 +517,8 @@ namespace
 			hold_state = {};
 			hold_next = {};
 			hold_start = {};
+			trigger_was_held = {};
+			trigger_next_kick = {};
 			have.clear();
 			pulses.clear();
 		}
@@ -661,6 +673,34 @@ namespace
 			}
 
 			update_hold(now);
+			update_trigger_recoil(now);
+		}
+
+		std::array<bool, 4> trigger_was_held{};
+		std::array<clock_type::time_point, 4> trigger_next_kick{};
+
+		void update_trigger_recoil(clock_type::time_point now)
+		{
+			if (active->trigger_recoil_ms <= 0) return;
+
+			const u8 triggers = read_triggers();
+			const bool state_ok = kick_allowed();
+
+			for (u32 i = 0; i < 4; i++)
+			{
+				const std::string prefix = "P" + std::to_string(i + 1) + "_";
+				const bool held = (triggers & (1u << i)) != 0;
+				const s64* life = raw_value(lower(prefix) + "life");
+				const bool allowed = state_ok && (!life || *life > 0);
+
+				if (held && allowed && (!trigger_was_held[i] || now >= trigger_next_kick[i]))
+				{
+					add_pulses(prefix + "CtmRecoil", 1, now, 40, 0);
+					trigger_next_kick[i] = now + std::chrono::milliseconds(active->trigger_recoil_ms);
+				}
+
+				trigger_was_held[i] = held;
+			}
 		}
 
 		// value read from the game for an output name (any letter case), or nullptr
