@@ -373,6 +373,14 @@ public:
 		{
 			auto& handler = *ensure(g_fxo->try_get<MouseHandlerBase>());
 			std::lock_guard mouse_lock(handler.mutex);
+
+			// Pedal build: make sure the mouse handler is initialized. After loading a savestate of a game that only
+			// set it up through cellGem (The Shoot), nothing else does it: the guns stayed "not connected" forever.
+			if (attribute.max_connect)
+			{
+				handler.Init(std::min<u32>(attribute.max_connect, CELL_GEM_MAX_NUM));
+			}
+
 			const MouseInfo& info = handler.GetInfo();
 
 			for (u32 i = 0; i < CELL_GEM_MAX_NUM; i++)
