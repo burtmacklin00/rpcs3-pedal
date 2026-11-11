@@ -3565,8 +3565,8 @@ error_code cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, v
 		case move_handler::mouse:
 		case move_handler::raw_mouse:
 			mouse_input_to_pad(gem_num, inertial_state->pad.digitalbuttons, inertial_state->pad.analog_T);
-			// Pedal build: TriggerStart (outputs file) - on a continue screen the trigger also presses Start
-			if ((+inertial_state->pad.digitalbuttons & CELL_GEM_CTRL_T) && pedal_outputs::trigger_is_start(gem_num))
+			// Pedal build: TriggerStart (outputs file) - on a continue screen a trigger pull presses Start (one short press)
+			if (pedal_outputs::trigger_is_start(gem_num))
 			{
 				inertial_state->pad.digitalbuttons = static_cast<u16>(+inertial_state->pad.digitalbuttons | CELL_GEM_CTRL_START);
 			}
@@ -3814,8 +3814,8 @@ static error_code cellGemGetState_inner(u32 gem_num, u32 flag, u64 time_paramete
 		case move_handler::mouse:
 		case move_handler::raw_mouse:
 			mouse_input_to_pad(gem_num, gem_state->pad.digitalbuttons, gem_state->pad.analog_T);
-			// Pedal build: TriggerStart (outputs file) - on a continue screen the trigger also presses Start
-			if ((+gem_state->pad.digitalbuttons & CELL_GEM_CTRL_T) && pedal_outputs::trigger_is_start(gem_num))
+			// Pedal build: TriggerStart (outputs file) - on a continue screen a trigger pull presses Start (one short press)
+			if (pedal_outputs::trigger_is_start(gem_num))
 			{
 				gem_state->pad.digitalbuttons = static_cast<u16>(+gem_state->pad.digitalbuttons | CELL_GEM_CTRL_START);
 			}

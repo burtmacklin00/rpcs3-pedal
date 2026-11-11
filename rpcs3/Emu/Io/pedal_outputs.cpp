@@ -56,8 +56,9 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //                                    ; that stops partway when the wheel ends early)
 //   PlayingLatch = 1                 ; optional: once Pn_Playing has been on, keep showing life/ammo (no LED "death"
 //                                    ; flash when a stage ends and the game sets Pn_Playing back to 0)
-//   TriggerStart = 1                 ; optional: while a player is in the stage (Pn_Playing not 0) but has no life
-//                                    ; (continue screen, or Player 2 not joined yet), the trigger also presses Start
+//   TriggerStart = 1                 ; optional: while a player is in the stage (Pn_Playing not 0) but has had no life
+//                                    ; for a second (continue screen, or Player 2 not joined yet), a new trigger pull
+//                                    ; presses Start once (then nothing for 2 s, so it can't pause the game)
 //   DamagePause = 300                ; optional: no recoil kicks for that player this long after Pn_Damaged, so the
 //                                    ; damage rumble is not cut off by the next kick (0 - 2000 ms)
 //   TriggerRecoil = 125              ; optional, unlimited auto-fire games: kick on every trigger pull and every 125 ms
@@ -570,6 +571,10 @@ namespace
 			playing_seen = {};
 			hold_seen = false;
 			for (auto& t : g_trigger_start) t = false;
+			ts_was_zero = {};
+			ts_press_until = {};
+			ts_cooldown = {};
+			ts_last_triggers = 0;
 			trigger_next_kick = {};
 			have.clear();
 			pulses.clear();
@@ -636,21 +641,40 @@ namespace
 			if (on) pulses.push_back({name, now + std::chrono::milliseconds(40), 0});
 		}
 
-		// TriggerStart: player in the stage (Pn_Playing not 0) with no life -> the trigger also presses Start
-		void update_trigger_start()
+		// TriggerStart: player in the stage (Pn_Playing not 0) with no life -> a NEW trigger pull presses Start once.
+		// Waits 1 s after the life ran out (still shooting when you die must not pause the game), sends one short
+		// Start press per pull, then nothing for 2 s (the game may take a moment to give the life back).
+		std::array<clock_type::time_point, 4> ts_zero_since{};
+		std::array<clock_type::time_point, 4> ts_press_until{};
+		std::array<clock_type::time_point, 4> ts_cooldown{};
+		std::array<bool, 4> ts_was_zero{};
+		u8 ts_last_triggers = 0;
+
+		void update_trigger_start(clock_type::time_point now)
 		{
+			const u8 triggers = (active && active->trigger_start) ? read_triggers() : 0;
 			for (u32 i = 0; i < 4; i++)
 			{
-				bool on = false;
+				bool zero = false;
 				if (active && active->trigger_start)
 				{
 					const std::string p = "p" + std::to_string(i + 1) + "_";
 					const s64* playing = raw_value(p + "playing");
 					const s64* life = raw_value(p + "life");
-					on = playing && *playing != 0 && life && *life <= 0;
+					zero = playing && *playing != 0 && life && *life <= 0;
 				}
-				g_trigger_start[i] = on;
+				if (zero && !ts_was_zero[i]) ts_zero_since[i] = now;
+				ts_was_zero[i] = zero;
+
+				const bool pulled = (triggers & (1u << i)) && !(ts_last_triggers & (1u << i));
+				if (zero && pulled && now - ts_zero_since[i] >= std::chrono::milliseconds(1000) && now >= ts_cooldown[i])
+				{
+					ts_press_until[i] = now + std::chrono::milliseconds(150);
+					ts_cooldown[i] = now + std::chrono::milliseconds(2000);
+				}
+				g_trigger_start[i] = now < ts_press_until[i];
 			}
+			ts_last_triggers = triggers;
 		}
 
 		void add_pulses(const std::string& name, int count, clock_type::time_point now, int length_ms, int gap_ms)
@@ -770,7 +794,7 @@ namespace
 
 			update_hold(now);
 			update_trigger_recoil(now);
-			update_trigger_start();
+			update_trigger_start(now);
 		}
 
 		std::array<bool, 4> trigger_was_held{};
