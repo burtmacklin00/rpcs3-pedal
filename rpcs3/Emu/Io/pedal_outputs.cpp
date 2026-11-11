@@ -59,6 +59,8 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   TriggerStart = 1                 ; optional: while a player is in the stage (Pn_Playing not 0) but has had no life
 //                                    ; for a second (continue screen, or Player 2 not joined yet), a new trigger pull
 //                                    ; presses Start once (then nothing for 2 s, so it can't pause the game)
+//   TriggerStart = 2                 ; the same, and also outside a stage (Pn_Playing 0: menus, skip screens, Player 2
+//                                    ; joining on the main menu) every new pull presses Start - not while HoldWhen is on
 //   DamagePause = 300                ; optional: no recoil kicks for that player this long after Pn_Damaged, so the
 //                                    ; damage rumble is not cut off by the next kick (0 - 2000 ms)
 //   TriggerRecoil = 125              ; optional, unlimited auto-fire games: kick on every trigger pull and every 125 ms
@@ -126,6 +128,7 @@ namespace
 		int hold_delay_ms = 500;   // HoldDelay = <ms>: trigger held this long before Pn_Hold starts
 		bool hold_changing = false; // HoldWhen ... changing: the value must also still be changing
 		bool playing_latch = false; // PlayingLatch = 1: Pn_Playing only gates until it has been on once
+		bool trigger_start_menus = false; // TriggerStart = 2: also outside a stage (menus, skip screens, joining)
 		bool trigger_start = false; // TriggerStart = 1: trigger = Start while in the stage with no life (continue)
 		int damage_pause_ms = 0;    // DamagePause = <ms>: no kicks for a player this long after Pn_Damaged
 		bool ammo_needs_life = false; // AmmoNeedsLife = 1: Pn_Ammo is sent as 0 while Pn_Life is 0 (player not playing)
@@ -274,7 +277,11 @@ namespace
 						else outputs_log.error("%s: TriggerRecoil must be 40 - 2000 (ms)", entry.name);
 					}
 					else if (lower(key) == "playinglatch") game.playing_latch = val == "1" || lower(val) == "true";
-					else if (lower(key) == "triggerstart") game.trigger_start = val == "1" || lower(val) == "true";
+					else if (lower(key) == "triggerstart")
+					{
+						game.trigger_start = val == "1" || val == "2" || lower(val) == "true";
+						game.trigger_start_menus = val == "2";
+					}
 					else if (lower(key) == "damagepause")
 					{
 						s64 ms = 0;
@@ -673,6 +680,18 @@ namespace
 					ts_press_until[i] = now + std::chrono::milliseconds(150);
 					ts_cooldown[i] = now + std::chrono::milliseconds(2000);
 				}
+
+				// TriggerStart = 2: outside a stage (Pn_Playing 0: menus, skip screens, joining on the main menu) every
+				// new pull also presses Start once - but not while HoldWhen is on (the wheel)
+				if (active && active->trigger_start_menus && pulled && !hold_mode_on && now >= ts_cooldown[i])
+				{
+					const s64* playing = raw_value("p" + std::to_string(i + 1) + "_playing");
+					if (playing && *playing == 0)
+					{
+						ts_press_until[i] = now + std::chrono::milliseconds(150);
+						ts_cooldown[i] = now + std::chrono::milliseconds(500);
+					}
+				}
 				g_trigger_start[i] = now < ts_press_until[i];
 			}
 			ts_last_triggers = triggers;
@@ -868,11 +887,13 @@ namespace
 		std::array<clock_type::time_point, 4> hold_start{}; // when the trigger was pressed (0 = not held)
 		std::array<int, 4> hold_state{};
 		bool hold_seen = false;
+		bool hold_mode_on = false; // HoldWhen is true right now (e.g. the wheel is on screen)
 		s64 hold_last_value = 0;
 		clock_type::time_point hold_last_change{};
 
 		void update_hold(clock_type::time_point now)
 		{
+			hold_mode_on = false;
 			if (active->hold_when.empty()) return;
 
 			const s64* flag = raw_value(lower(active->hold_when));
@@ -885,6 +906,7 @@ namespace
 			}
 			// "changing": only while the value moved in the last 300 ms (a countdown that is still running)
 			if (active->hold_changing && now - hold_last_change > std::chrono::milliseconds(300)) mode = false;
+			hold_mode_on = mode;
 			const u8 triggers = mode ? read_triggers() : 0;
 
 			for (u32 i = 0; i < 4; i++)
