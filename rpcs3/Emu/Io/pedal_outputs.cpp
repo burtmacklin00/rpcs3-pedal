@@ -80,6 +80,7 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //
 // Outputs made automatically from the values above (per player Pn):
 //   Pn_CtmRecoil  1 then 0 for every bullet fired (Pn_Ammo goes down by 1-5, or Pn_Shots goes up)
+//                 (several counters per player work too: P1_Shots_Stage1, P1_Shots_Stage2 ... each kicks when it goes up)
 //                 Several weapons: Pn_Ammo_<anything> (one per weapon) each kick; Pn_Ammo is then display only
 //   Optional after the address on an Ammo / Shots line:
 //     kick=P1_Grenade   this weapon's kicks go to output P1_Grenade instead of P1_CtmRecoil (own feel in the DefaultLG file)
@@ -754,7 +755,7 @@ namespace
 				{
 					add_pulses(o.kick.empty() ? prefix + "CtmRecoil" : o.kick, static_cast<int>(old - v), now, o.kick_ms, 40);
 				}
-				else if (what == "shots" && v > old && v - old <= 5 && kick_allowed() && !paused)
+				else if ((what == "shots" || what.starts_with("shots_")) && v > old && v - old <= 5 && kick_allowed() && !paused)
 				{
 					add_pulses(o.kick.empty() ? prefix + "CtmRecoil" : o.kick, static_cast<int>(v - old), now, o.kick_ms, 40);
 				}
