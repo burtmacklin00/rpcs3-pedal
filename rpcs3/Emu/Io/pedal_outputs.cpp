@@ -86,6 +86,12 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   P1_Hits = rumbleon 0 min=200     ; only count it when the shaking gets to at least 200 (of 255): games that also
 //                                    ; shake gently for other things (menu highlights)
 //
+//   Games that keep their values in Lua script variables (The Shoot): find the value by its variable name
+//   P1_Ammo = lua numBullets pick=1 near=numLives+0x28
+//     pick=<n>          several tables have that name: use the n-th one (lowest address first), after near=
+//     near=<name>+<off> only variables that have another variable <name> <off> bytes away (same table)
+//                       (number variables only; 0 while not found, e.g. on the menus)
+//
 //   Games whose values move around (different place each boot): in [Game] give bytes that always sit
 //   next to the values, and write output addresses as @+offset / @-offset from where they were found:
 //   Find = 0000000e 00000005 00000002 00000096   ; hex bytes, spaces ignored; first match is used
@@ -134,6 +140,11 @@ namespace
 		int kick_ms = 40;         // pulse=<ms>: how long each kick is held on
 		f64 scale = 1.0;          // scale=<n>: f32 values are multiplied by this before rounding
 		s64 bar = 0;              // bar=<max>: up-and-down level for Display_Range (send max before every rise)
+		bool lua = false;         // "lua <name>": a Lua number variable found by its name
+		std::string lua_name;
+		int lua_pick = 1;         // pick=<n>
+		std::string lua_near;     // near=<name><+/-off>
+		s64 lua_near_off = 0;
 		int rumble = 0;           // 1 = "rumble <n>": Move controller n's rumble strength, 2 = "rumbleon <n>": times it started
 		int rumble_min = 1;       // rumbleon ... min=<1-255>: only count it when it gets at least this strong
 	};
@@ -233,21 +244,31 @@ namespace
 			}
 			return true;
 		}
-		out.is_float = type == "f32";
-		out.is_signed = type.starts_with('s');
-		if (type == "u8" || type == "s8") out.size = 1;
-		else if (type == "u16" || type == "s16") out.size = 2;
-		else if (type == "u32" || type == "s32" || type == "f32") out.size = 4;
-		else return false;
-
-		s64 addr = 0;
-		if (parts[1].starts_with('@'))
+		if (type == "lua")
 		{
-			out.relative = true;
-			if (!parse_number(parts[1].substr(1), addr)) return false;
+			out.lua = true;
+			out.lua_name = parts[1];
+			out.is_float = true;
+			out.size = 4;
 		}
-		else if (!parse_number(parts[1], addr)) return false;
-		out.address = static_cast<u32>(addr);
+		else
+		{
+			out.is_float = type == "f32";
+			out.is_signed = type.starts_with('s');
+			if (type == "u8" || type == "s8") out.size = 1;
+			else if (type == "u16" || type == "s16") out.size = 2;
+			else if (type == "u32" || type == "s32" || type == "f32") out.size = 4;
+			else return false;
+
+			s64 addr = 0;
+			if (parts[1].starts_with('@'))
+			{
+				out.relative = true;
+				if (!parse_number(parts[1].substr(1), addr)) return false;
+			}
+			else if (!parse_number(parts[1], addr)) return false;
+			out.address = static_cast<u32>(addr);
+		}
 
 		for (usz i = 2; i < parts.size(); i++)
 		{
@@ -255,6 +276,21 @@ namespace
 			if (pl.starts_with("kick="))
 			{
 				out.kick = parts[i].substr(5);
+				continue;
+			}
+			if (pl.starts_with("pick="))
+			{
+				s64 n = 0;
+				if (!parse_number(parts[i].substr(5), n) || n < 1 || n > 16) return false;
+				out.lua_pick = static_cast<int>(n);
+				continue;
+			}
+			if (pl.starts_with("near="))
+			{
+				const std::string v = parts[i].substr(5);
+				const usz sign = v.find_first_of("+-");
+				if (sign == umax || sign == 0 || !parse_number(v.substr(sign), out.lua_near_off)) return false;
+				out.lua_near = v.substr(0, sign);
 				continue;
 			}
 			if (pl.starts_with("bar="))
@@ -430,6 +466,7 @@ namespace
 
 	bool read_value(const output_def& o, u32 found, s64& out)
 	{
+		if (o.lua) return false; // read by the server (lua_read)
 		if (o.rumble)
 		{
 			out = o.rumble == 1 ? g_gem_rumble[o.address].load() : g_gem_rumble_starts[o.address][o.rumble_min].load();
@@ -522,6 +559,125 @@ namespace
 				prev_end = static_cast<u32>(a + 4096);
 			}
 		}
+		// ---- Lua variables (outputs "lua <name>") ----
+		// Lua 5.1 on the PS3 (big endian, 32 bit): a string is [next][tt=4][marked][..][hash][len][chars\0], and a
+		// table slot is [value f32][tt=3 number][key = string address][key tt=4][next]. The string of a name never
+		// moves while it is in use, the table slot is found again whenever it stops matching.
+		std::map<std::string, u32> lua_slot;    // output name -> table slot address
+		std::map<std::string, u32> lua_key;     // output name -> key string address of that slot
+		clock_type::time_point lua_last_scan{};
+
+		static bool lua_slot_ok(u32 slot, u32 key)
+		{
+			be_t<u32> w[4]{};
+			if (!vm::try_access(slot, w, sizeof(w), false)) return false;
+			return +w[1] == 3 && +w[2] == key && +w[3] == 4;
+		}
+
+		void lua_rescan()
+		{
+			// names needed
+			std::map<std::string, std::vector<u32>> strings; // name -> string addresses
+			for (const output_def& o : active->outputs)
+			{
+				if (!o.lua) continue;
+				strings[o.lua_name];
+				if (!o.lua_near.empty()) strings[o.lua_near];
+			}
+			if (strings.empty()) return;
+
+			constexpr u64 lo = 0x30000000, hi = 0x40000000;
+
+			// pass 1: the strings ([len][chars][0], tt 4 twelve bytes before the length)
+			for (u64 a = lo; a < hi; a += 4096)
+			{
+				if (!vm::check_addr(static_cast<u32>(a), vm::page_readable, 4096)) continue;
+				const u8* p = static_cast<const u8*>(vm::base(static_cast<u32>(a)));
+				// game memory is one block on the PC side: a string may run on into the next page if that one is readable
+				const bool next_ok = a + 4096 < hi && vm::check_addr(static_cast<u32>(a + 4096), vm::page_readable, 4096);
+				for (auto& [name, list] : strings)
+				{
+					const usz n = name.size();
+					for (usz i = 12; i < 4096 && (i + 4 + n + 1 <= 4096 || next_ok); i += 4)
+					{
+						if (p[i] != 0 || p[i + 1] != 0 || p[i + 2] != ((n >> 8) & 0xff) || p[i + 3] != (n & 0xff)) continue;
+						if (p[i + 4 + n] != 0 || std::memcmp(p + i + 4, name.data(), n) != 0) continue;
+						if (p[i - 8] != 4) continue;
+						list.push_back(static_cast<u32>(a + i - 12));
+					}
+				}
+			}
+
+			// pass 2: table slots whose key is one of those strings
+			std::map<u32, const std::string*> key_name;
+			for (const auto& [name, list] : strings)
+				for (u32 k : list) key_name[k] = &name;
+			std::map<std::string, std::vector<u32>> slots; // name -> slot addresses (sorted)
+			if (!key_name.empty())
+			{
+				for (u64 a = lo; a < hi; a += 4096)
+				{
+					if (!vm::check_addr(static_cast<u32>(a), vm::page_readable, 4096)) continue;
+					const be_t<u32>* w = static_cast<const be_t<u32>*>(vm::base(static_cast<u32>(a)));
+					const bool next_ok = a + 4096 < hi && vm::check_addr(static_cast<u32>(a + 4096), vm::page_readable, 4096);
+					for (usz i = 2; i < (next_ok ? 1026 : 1023); i++)
+					{
+						if (+w[i + 1] != 4 || +w[i - 1] != 3) continue;
+						const auto it = key_name.find(+w[i]);
+						if (it == key_name.end()) continue;
+						slots[*it->second].push_back(static_cast<u32>(a + (i - 2) * 4));
+					}
+				}
+			}
+
+			for (const output_def& o : active->outputs)
+			{
+				if (!o.lua) continue;
+				std::vector<u32> c = slots[o.lua_name];
+				if (!o.lua_near.empty())
+				{
+					const std::vector<u32>& near_slots = slots[o.lua_near];
+					std::erase_if(c, [&](u32 s) { return std::find(near_slots.begin(), near_slots.end(), static_cast<u32>(s + o.lua_near_off)) == near_slots.end(); });
+				}
+				std::sort(c.begin(), c.end());
+				if (static_cast<usz>(o.lua_pick) <= c.size())
+				{
+					const u32 slot = c[o.lua_pick - 1];
+					be_t<u32> key{};
+					vm::try_access(slot + 8, &key, 4, false);
+					if (lua_slot[o.name] != slot) outputs_log.notice("%s: Lua %s found at 0x%x", o.name, o.lua_name, slot);
+					lua_slot[o.name] = slot;
+					lua_key[o.name] = +key;
+				}
+				else
+				{
+					lua_slot.erase(o.name);
+					lua_key.erase(o.name);
+				}
+			}
+		}
+
+		// value of a "lua" output (0 while it is not found)
+		s64 lua_read(const output_def& o, clock_type::time_point now)
+		{
+			auto it = lua_slot.find(o.name);
+			if (it == lua_slot.end() || !lua_slot_ok(it->second, lua_key[o.name]))
+			{
+				// look again at most every 2 seconds (scans the game's memory)
+				if (now - lua_last_scan >= std::chrono::seconds(2))
+				{
+					lua_last_scan = now;
+					lua_rescan();
+				}
+				it = lua_slot.find(o.name);
+				if (it == lua_slot.end() || !lua_slot_ok(it->second, lua_key[o.name])) return 0;
+			}
+			be_t<f32> f{};
+			if (!vm::try_access(it->second, &f, 4, false)) return 0;
+			const f32 v = f;
+			return std::isfinite(v) ? static_cast<s64>(std::llround(v * o.scale)) : 0;
+		}
+
 		std::string active_key;
 		std::map<std::string, s64> values;     // last value of every output (watched + made), as sent
 		std::map<std::string, s64> raw;        // last value read from the game (watched outputs)
@@ -668,6 +824,9 @@ namespace
 			values.clear();
 			raw.clear();
 			found = 0;
+			lua_slot.clear();
+			lua_key.clear();
+			lua_last_scan = {};
 			hold_state = {};
 			hold_next = {};
 			hold_start = {};
@@ -870,7 +1029,8 @@ namespace
 			for (const output_def& o : active->outputs)
 			{
 				s64 v = 0;
-				if (!read_value(o, found, v)) continue;
+				if (o.lua) v = lua_read(o, now);
+				else if (!read_value(o, found, v)) continue;
 
 				const auto old_it = raw.find(o.name);
 				const bool had = have[o.name] && old_it != raw.end();
