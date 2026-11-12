@@ -14,6 +14,9 @@ namespace pedal_outputs
 
 	// TriggerStart (outputs file): true while this player's trigger should also press Start (continue screen)
 	bool trigger_is_start(unsigned int player);
+
+	// cellGem: the game set Move controller gem_num's rumble (for outputs "rumble" / "rumbleon")
+	void gem_rumble(unsigned int gem_num, unsigned char rumble);
 }
 
 // Pedal build: per-game profiles.

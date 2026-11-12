@@ -4353,6 +4353,7 @@ error_code cellGemSetRumble(u32 gem_num, u8 rumble)
 	}
 
 	gem.controllers[gem_num].rumble = rumble;
+	pedal_outputs::gem_rumble(gem_num, rumble);
 
 	// Set actual device rumble
 	if (g_cfg.io.move == move_handler::real)

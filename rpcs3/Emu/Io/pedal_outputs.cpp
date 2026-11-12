@@ -69,6 +69,7 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //                                    ; damage rumble is not cut off by the next kick (0 - 2000 ms)
 //   TriggerRecoil = 125              ; optional, unlimited auto-fire games: kick on every trigger pull and every 125 ms
 //                                    ; while held (only while KickWhen allows and that player's Pn_Life > 0)
+//   TriggerRecoil = once             ; the same, but one kick per trigger pull (no repeat while held)
 //   Capture = 1                      ; optional: memory snapshot after every trigger pull (for finding addresses;
 //                                    ; files are named ..._P1shot / _P2shot). Remove when done.
 //
@@ -77,6 +78,9 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   P1_Life = u16 0x10050000 +0x24   ; pointer: read 32-bit pointer at the address, then add +0x24
 //                                    ; (more +offsets = more pointer steps)
 //   Types: u8 u16 u32 s8 s16 s32 f32 (PS3 memory is big endian; this is handled for you)
+//   P1_Rumble = rumble 0             ; not memory: how hard the game is shaking Move controller 0 right now (0 - 255)
+//   P1_Hits = rumbleon 0             ; not memory: counts every time the game starts shaking Move controller 0
+//                                    ; (games that shake the controller when the player is hit)
 //
 //   Games whose values move around (different place each boot): in [Game] give bytes that always sit
 //   next to the values, and write output addresses as @+offset / @-offset from where they were found:
@@ -93,6 +97,7 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //     pulse=150         each kick is held on 150 ms instead of 40
 //   Pn_Damaged    1 then 0 when Pn_Life goes down but not to 0 (never on the killing hit)
 //   Pn_Death      1 then 0 when Pn_Life goes down to 0
+//   Pn_Damaged    also 1 then 0 when Pn_Hits goes up (games with no life bar)
 //
 // Finding addresses: press F10 while a game runs to save a memory snapshot (plus a screenshot in RPCS3's
 // screenshots folder, so you can see what was on screen) to
@@ -117,6 +122,7 @@ namespace
 		bool relative = false;    // address written as @+0x.. / @-0x..: counted from where [Game] Find was found
 		std::string kick;         // kick=<name>: this weapon's recoil goes to <name> instead of Pn_CtmRecoil
 		int kick_ms = 40;         // pulse=<ms>: how long each kick is held on
+		int rumble = 0;           // 1 = "rumble <n>": Move controller n's rumble strength, 2 = "rumbleon <n>": times it started
 	};
 
 	struct game_def
@@ -141,6 +147,7 @@ namespace
 		bool trigger_start = false; // TriggerStart = 1: trigger = Start while in the stage with no life (continue)
 		int damage_pause_ms = 0;    // DamagePause = <ms>: no kicks for a player this long after Pn_Damaged
 		bool ammo_needs_life = false; // AmmoNeedsLife = 1: Pn_Ammo is sent as 0 while Pn_Life is 0 (player not playing)
+		bool trigger_recoil_once = false; // TriggerRecoil = once: one kick per pull
 		int trigger_recoil_ms = 0;  // TriggerRecoil = <ms>: games with unlimited auto-fire - kick on every trigger pull and
 		                            //   every <ms> while it is held (only while KickWhen allows and the player's life > 0)
 		std::vector<u8> find;      // Find = bytes (hex) the game keeps next to its values; outputs with @ addresses follow it
@@ -158,6 +165,8 @@ namespace
 
 	std::atomic<bool> g_stop{false};
 	std::array<std::atomic<bool>, 4> g_trigger_start{}; // TriggerStart: read by cellGem
+	std::array<std::atomic<s64>, 4> g_gem_rumble{};        // Move controller rumble the game set (cellGemSetRumble)
+	std::array<std::atomic<s64>, 4> g_gem_rumble_starts{}; // times the rumble went from off to on
 	std::thread g_thread;
 	std::once_flag g_once;
 
@@ -194,6 +203,14 @@ namespace
 
 		const std::string type = lower(parts[0]);
 		out.name = name;
+		if (type == "rumble" || type == "rumbleon")
+		{
+			s64 n = 0;
+			if (!parse_number(parts[1], n) || n < 0 || n > 3) return false;
+			out.rumble = type == "rumble" ? 1 : 2;
+			out.address = static_cast<u32>(n);
+			return true;
+		}
 		out.is_float = type == "f32";
 		out.is_signed = type.starts_with('s');
 		if (type == "u8" || type == "s8") out.size = 1;
@@ -282,8 +299,9 @@ namespace
 					else if (lower(key) == "triggerrecoil")
 					{
 						s64 ms = 0;
-						if (parse_number(val, ms) && ms >= 40 && ms <= 2000) game.trigger_recoil_ms = static_cast<int>(ms);
-						else outputs_log.error("%s: TriggerRecoil must be 40 - 2000 (ms)", entry.name);
+						if (lower(val) == "once") { game.trigger_recoil_ms = 1; game.trigger_recoil_once = true; }
+						else if (parse_number(val, ms) && ms >= 40 && ms <= 2000) game.trigger_recoil_ms = static_cast<int>(ms);
+						else outputs_log.error("%s: TriggerRecoil must be 40 - 2000 (ms) or once", entry.name);
 					}
 					else if (lower(key) == "playinglatch") game.playing_latch = val == "1" || lower(val) == "true";
 					else if (lower(key) == "triggerstart")
@@ -372,6 +390,11 @@ namespace
 
 	bool read_value(const output_def& o, u32 found, s64& out)
 	{
+		if (o.rumble)
+		{
+			out = o.rumble == 1 ? g_gem_rumble[o.address].load() : g_gem_rumble_starts[o.address].load();
+			return true;
+		}
 		if (o.relative && !found) return false;
 		u32 addr = o.relative ? found + o.address : o.address;
 
@@ -820,8 +843,9 @@ namespace
 				{
 					add_pulses(o.kick.empty() ? prefix + "CtmRecoil" : o.kick, static_cast<int>(v - old), now, o.kick_ms, 40);
 				}
-				else if (what == "life" && v < old)
+				else if ((what == "life" && v < old) || (what == "hits" && v > old && kick_allowed()))
 				{
+					if (what == "hits") v = 1; // a hit, not a life value: never the killing hit
 					add_pulses(prefix + (v > 0 ? "Damaged" : "Death"), 1, now, 150, 0);
 					if (const u32 pi = player_index(prefix); pi < 4 && v > 0)
 					{
@@ -882,7 +906,7 @@ namespace
 				if (!held) trigger_needs_release[i] = false;
 				else if (!trigger_was_held[i] && !allowed) trigger_needs_release[i] = true;
 
-				if (held && allowed && !trigger_needs_release[i] && (!trigger_was_held[i] || now >= trigger_next_kick[i]))
+				if (held && allowed && !trigger_needs_release[i] && (!trigger_was_held[i] || (!active->trigger_recoil_once && now >= trigger_next_kick[i])))
 				{
 					add_pulses(prefix + "CtmRecoil", 1, now, 40, 0);
 					trigger_next_kick[i] = now + std::chrono::milliseconds(active->trigger_recoil_ms);
@@ -1133,6 +1157,13 @@ namespace pedal_outputs
 		return player < 4 && g_trigger_start[player].load();
 	}
 
+	void gem_rumble(u32 gem_num, u8 rumble)
+	{
+		if (gem_num >= 4) return;
+		const s64 old = g_gem_rumble[gem_num].exchange(rumble);
+		if (old == 0 && rumble != 0) g_gem_rumble_starts[gem_num]++;
+	}
+
 	void start()
 	{
 		std::call_once(g_once, []()
@@ -1166,6 +1197,7 @@ namespace pedal_outputs
 {
 	void start() {}
 	bool trigger_is_start(u32) { return false; }
+	void gem_rumble(u32, u8) {}
 }
 
 #endif
