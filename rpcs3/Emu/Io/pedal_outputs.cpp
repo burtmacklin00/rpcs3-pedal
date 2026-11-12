@@ -59,6 +59,8 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   TriggerStart = 1                 ; optional: while a player is in the stage (Pn_Playing not 0) but has had no life
 //                                    ; for a second (continue screen, or Player 2 not joined yet), a new trigger pull
 //                                    ; presses Start once (then nothing for 2 s, so it can't pause the game)
+//   TriggerStart = 3                 ; like 1, but on any screen: a player with no life (not joined yet, or on the
+//                                    ; continue screen) presses Start with a new trigger pull - joining from the menus
 //   TriggerStart = 2                 ; the same, and also outside a stage (Pn_Playing 0: menus, skip screens, Player 2
 //                                    ; joining on the main menu) every new pull presses Start - not while HoldWhen is on
 //   DamagePause = 300                ; optional: no recoil kicks for that player this long after Pn_Damaged, so the
@@ -128,6 +130,7 @@ namespace
 		int hold_delay_ms = 500;   // HoldDelay = <ms>: trigger held this long before Pn_Hold starts
 		bool hold_changing = false; // HoldWhen ... changing: the value must also still be changing
 		bool playing_latch = false; // PlayingLatch = 1: Pn_Playing only gates until it has been on once
+		bool trigger_start_anywhere = false; // TriggerStart = 3: no-life rule also outside a stage (join from any screen)
 		bool trigger_start_menus = false; // TriggerStart = 2: also outside a stage (menus, skip screens, joining)
 		bool trigger_start = false; // TriggerStart = 1: trigger = Start while in the stage with no life (continue)
 		int damage_pause_ms = 0;    // DamagePause = <ms>: no kicks for a player this long after Pn_Damaged
@@ -279,8 +282,9 @@ namespace
 					else if (lower(key) == "playinglatch") game.playing_latch = val == "1" || lower(val) == "true";
 					else if (lower(key) == "triggerstart")
 					{
-						game.trigger_start = val == "1" || val == "2" || lower(val) == "true";
+						game.trigger_start = val == "1" || val == "2" || val == "3" || lower(val) == "true";
 						game.trigger_start_menus = val == "2";
+						game.trigger_start_anywhere = val == "3";
 					}
 					else if (lower(key) == "damagepause")
 					{
@@ -669,7 +673,7 @@ namespace
 					const std::string p = "p" + std::to_string(i + 1) + "_";
 					const s64* playing = raw_value(p + "playing");
 					const s64* life = raw_value(p + "life");
-					zero = playing && *playing != 0 && life && *life <= 0;
+					zero = life && *life <= 0 && ((playing && *playing != 0) || active->trigger_start_anywhere);
 				}
 				if (zero && !ts_was_zero[i]) ts_zero_since[i] = now;
 				ts_was_zero[i] = zero;
