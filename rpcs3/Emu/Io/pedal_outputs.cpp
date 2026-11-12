@@ -671,6 +671,8 @@ namespace
 				{
 					// skip pulse outputs (recoil, damage...) - only states like life / ammo
 					if (name.find("CtmRecoil") != umax || name.find("Damaged") != umax || name.find("Death") != umax || name.find("_Hold") != umax) continue;
+					// skip 0: a life of 0 would make Hook of the Reaper play the death effect again
+					if (value == 0) continue;
 					broadcast(fmt::format("%s = %d\r", name, value));
 				}
 			}
