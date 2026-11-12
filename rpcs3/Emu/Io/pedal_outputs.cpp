@@ -81,6 +81,8 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   P1_Rumble = rumble 0             ; not memory: how hard the game is shaking Move controller 0 right now (0 - 255)
 //   P1_Hits = rumbleon 0             ; not memory: counts every time the game starts shaking Move controller 0
 //                                    ; (games that shake the controller when the player is hit)
+//   P1_Hits = rumbleon 0 min=200     ; only count it when the shaking gets to at least 200 (of 255): games that also
+//                                    ; shake gently for other things (menu highlights)
 //
 //   Games whose values move around (different place each boot): in [Game] give bytes that always sit
 //   next to the values, and write output addresses as @+offset / @-offset from where they were found:
@@ -123,6 +125,7 @@ namespace
 		std::string kick;         // kick=<name>: this weapon's recoil goes to <name> instead of Pn_CtmRecoil
 		int kick_ms = 40;         // pulse=<ms>: how long each kick is held on
 		int rumble = 0;           // 1 = "rumble <n>": Move controller n's rumble strength, 2 = "rumbleon <n>": times it started
+		int rumble_min = 1;       // rumbleon ... min=<1-255>: only count it when it gets at least this strong
 	};
 
 	struct game_def
@@ -166,7 +169,7 @@ namespace
 	std::atomic<bool> g_stop{false};
 	std::array<std::atomic<bool>, 4> g_trigger_start{}; // TriggerStart: read by cellGem
 	std::array<std::atomic<s64>, 4> g_gem_rumble{};        // Move controller rumble the game set (cellGemSetRumble)
-	std::array<std::atomic<s64>, 4> g_gem_rumble_starts{}; // times the rumble went from off to on
+	std::array<std::array<std::atomic<s64>, 256>, 4> g_gem_rumble_starts{}; // [gem][v]: times the rumble went from below v to v or more
 	std::thread g_thread;
 	std::once_flag g_once;
 
@@ -209,6 +212,12 @@ namespace
 			if (!parse_number(parts[1], n) || n < 0 || n > 3) return false;
 			out.rumble = type == "rumble" ? 1 : 2;
 			out.address = static_cast<u32>(n);
+			for (usz i = 2; i < parts.size(); i++)
+			{
+				s64 m = 0;
+				if (!lower(parts[i]).starts_with("min=") || !parse_number(parts[i].substr(4), m) || m < 1 || m > 255) return false;
+				out.rumble_min = static_cast<int>(m);
+			}
 			return true;
 		}
 		out.is_float = type == "f32";
@@ -392,7 +401,7 @@ namespace
 	{
 		if (o.rumble)
 		{
-			out = o.rumble == 1 ? g_gem_rumble[o.address].load() : g_gem_rumble_starts[o.address].load();
+			out = o.rumble == 1 ? g_gem_rumble[o.address].load() : g_gem_rumble_starts[o.address][o.rumble_min].load();
 			return true;
 		}
 		if (o.relative && !found) return false;
@@ -1161,7 +1170,7 @@ namespace pedal_outputs
 	{
 		if (gem_num >= 4) return;
 		const s64 old = g_gem_rumble[gem_num].exchange(rumble);
-		if (old == 0 && rumble != 0) g_gem_rumble_starts[gem_num]++;
+		for (s64 v = old + 1; v <= rumble; v++) g_gem_rumble_starts[gem_num][v]++;
 	}
 
 	void start()
