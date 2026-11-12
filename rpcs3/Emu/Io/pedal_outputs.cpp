@@ -551,6 +551,7 @@ namespace
 
 				if (active)
 				{
+					resend_at = {clock_type::now() + std::chrono::seconds(2), clock_type::now() + std::chrono::seconds(5)};
 					send_to(c, fmt::format("mame_start = %s\r", active->rom));
 					for (const auto& [name, value] : values)
 					{
@@ -647,11 +648,33 @@ namespace
 			{
 				outputs_log.notice("Game started: %s (%s, %d outputs)", active->rom, active->file, active->outputs.size());
 				broadcast(fmt::format("mame_start = %s\r", active->rom));
+				// Hook of the Reaper is still loading the game's files right after mame_start and can miss the first
+				// values (life LEDs stayed dark until the life changed) - send everything again a bit later
+				resend_at = {clock_type::now() + std::chrono::seconds(2), clock_type::now() + std::chrono::seconds(5)};
 			}
 		}
 
 		std::array<clock_type::time_point, 4> damage_until{};
 		std::array<bool, 4> playing_seen{};
+		std::array<clock_type::time_point, 2> resend_at{};
+
+		// send every current value again (see check_game)
+		void resend_values()
+		{
+			if (!active) return;
+			const auto now = clock_type::now();
+			for (auto& t : resend_at)
+			{
+				if (t == clock_type::time_point{} || now < t) continue;
+				t = {};
+				for (const auto& [name, value] : values)
+				{
+					// skip pulse outputs (recoil, damage...) - only states like life / ammo
+					if (name.find("CtmRecoil") != umax || name.find("Damaged") != umax || name.find("Death") != umax || name.find("_Hold") != umax) continue;
+					broadcast(fmt::format("%s = %d\r", name, value));
+				}
+			}
+		}
 
 		static u32 player_index(const std::string& prefix)
 		{
@@ -1075,6 +1098,7 @@ namespace
 				check_game();
 				poll_values();
 				run_pulses();
+				resend_values();
 				check_capture();
 
 				// F10 = memory snapshot (for finding ammo / life addresses)
