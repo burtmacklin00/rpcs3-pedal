@@ -99,6 +99,8 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   Optional after the address on an Ammo / Shots line:
 //     kick=P1_Grenade   this weapon's kicks go to output P1_Grenade instead of P1_CtmRecoil (own feel in the DefaultLG file)
 //     pulse=150         each kick is held on 150 ms instead of 40
+//   Optional after the address on any f32 line:
+//     scale=100         multiply before sending (a 0.0 - 1.0 meter becomes 0 - 100)
 //   Pn_Damaged    1 then 0 when Pn_Life goes down but not to 0 (never on the killing hit)
 //   Pn_Death      1 then 0 when Pn_Life goes down to 0
 //   Pn_Damaged    also 1 then 0 when Pn_Hits goes up (games with no life bar)
@@ -126,6 +128,7 @@ namespace
 		bool relative = false;    // address written as @+0x.. / @-0x..: counted from where [Game] Find was found
 		std::string kick;         // kick=<name>: this weapon's recoil goes to <name> instead of Pn_CtmRecoil
 		int kick_ms = 40;         // pulse=<ms>: how long each kick is held on
+		f64 scale = 1.0;          // scale=<n>: f32 values are multiplied by this before rounding
 		int rumble = 0;           // 1 = "rumble <n>": Move controller n's rumble strength, 2 = "rumbleon <n>": times it started
 		int rumble_min = 1;       // rumbleon ... min=<1-255>: only count it when it gets at least this strong
 	};
@@ -247,6 +250,11 @@ namespace
 			if (pl.starts_with("kick="))
 			{
 				out.kick = parts[i].substr(5);
+				continue;
+			}
+			if (pl.starts_with("scale="))
+			{
+				try { out.scale = std::stod(parts[i].substr(6)); } catch (...) { return false; }
 				continue;
 			}
 			if (pl.starts_with("pulse="))
@@ -437,7 +445,7 @@ namespace
 		{
 			f32 f;
 			std::memcpy(&f, &raw, 4);
-			out = std::isfinite(f) ? static_cast<s64>(std::lround(f)) : 0;
+			out = std::isfinite(f) ? static_cast<s64>(std::llround(f * o.scale)) : 0;
 		}
 		else if (o.is_signed)
 		{
