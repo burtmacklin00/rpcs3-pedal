@@ -101,6 +101,10 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //     pulse=150         each kick is held on 150 ms instead of 40
 //   Optional after the address on any f32 line:
 //     scale=100         multiply before sending (a 0.0 - 1.0 meter becomes 0 - 100)
+//   Optional after the address on any line:
+//     bar=100           a level that can go up and down (a meter, not ammo): Hook of the Reaper's Display_Range
+//                       takes the first value it gets as "full" and shows any rise as a refill to full. So 100 is
+//                       sent first, and before every rise, then the real value - the strip always shows the real level.
 //   Pn_Damaged    1 then 0 when Pn_Life goes down but not to 0 (never on the killing hit)
 //   Pn_Death      1 then 0 when Pn_Life goes down to 0
 //   Pn_Damaged    also 1 then 0 when Pn_Hits goes up (games with no life bar)
@@ -129,6 +133,7 @@ namespace
 		std::string kick;         // kick=<name>: this weapon's recoil goes to <name> instead of Pn_CtmRecoil
 		int kick_ms = 40;         // pulse=<ms>: how long each kick is held on
 		f64 scale = 1.0;          // scale=<n>: f32 values are multiplied by this before rounding
+		s64 bar = 0;              // bar=<max>: up-and-down level for Display_Range (send max before every rise)
 		int rumble = 0;           // 1 = "rumble <n>": Move controller n's rumble strength, 2 = "rumbleon <n>": times it started
 		int rumble_min = 1;       // rumbleon ... min=<1-255>: only count it when it gets at least this strong
 	};
@@ -250,6 +255,11 @@ namespace
 			if (pl.starts_with("kick="))
 			{
 				out.kick = parts[i].substr(5);
+				continue;
+			}
+			if (pl.starts_with("bar="))
+			{
+				if (!parse_number(parts[i].substr(4), out.bar) || out.bar < 1) return false;
 				continue;
 			}
 			if (pl.starts_with("scale="))
@@ -575,11 +585,29 @@ namespace
 			}
 		}
 
+		// bar=<max> of an output name (0 = not a bar)
+		s64 bar_max(const std::string& name) const
+		{
+			if (!active) return 0;
+			for (const output_def& o : active->outputs)
+			{
+				if (o.name == name) return o.bar;
+			}
+			return 0;
+		}
+
 		void set(const std::string& name, s64 value)
 		{
 			auto [it, added] = values.try_emplace(name, value);
 			if (!added && it->second == value) return;
+			const s64 old = added ? 0 : it->second;
 			it->second = value;
+
+			// bar: Hook of the Reaper shows a rise as a refill to full - send full first, then the real level
+			if (const s64 max = bar_max(name); max > 0 && value > old && value > 0 && value < max)
+			{
+				broadcast(fmt::format("%s = %d\r", name, max));
+			}
 
 			if (active && active->debug)
 			{
@@ -726,6 +754,8 @@ namespace
 					if (name.find("CtmRecoil") != umax || name.find("Damaged") != umax || name.find("Death") != umax || name.find("_Hold") != umax) continue;
 					// skip 0: a life of 0 would make Hook of the Reaper play the death effect again
 					if (value == 0) continue;
+					// a bar: full first, so a Hook of the Reaper that missed the start still knows the full level
+					if (const s64 max = bar_max(name); max > 0 && value < max) broadcast(fmt::format("%s = %d\r", name, max));
 					broadcast(fmt::format("%s = %d\r", name, value));
 				}
 			}
