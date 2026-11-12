@@ -49,6 +49,8 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   Pn_Playing = <address>           ; optional output: 0 = player not in the game -> Pn_Ammo and Pn_Life are sent as 0
 //   KickWhen = ShootFlag 1           ; optional: recoil kicks only while output ShootFlag is 1
 //                                    ; (a range works too: KickWhen = GameState 4-8)
+//   P2_KickWhen = Turn 3             ; optional, per player (P1_ - P4_): that player's recoil and damage only while
+//                                    ; output Turn is 3 (games where players take turns, or Player 2 is not in)
 //   HoldWhen = ShootFlag 0           ; optional: while ShootFlag is 0 (or a range, like KickWhen), holding a gun's trigger
 //                                    ; (at least HoldDelay ms) sends Pn_Hold 1/0 every 100 ms
 //   HoldDelay = 500                  ; optional: how long the trigger must be held before Pn_Hold starts (0 - 5000 ms)
@@ -138,6 +140,9 @@ namespace
 		std::string kick_when;     // KickWhen = <output> <value>: recoil kicks only while that output has that value
 		s64 kick_when_value = 0;   //   value, or a range <lo>-<hi>
 		s64 kick_when_hi = 0;
+		std::array<std::string, 4> player_kick_when; // Pn_KickWhen = <output> <value or lo-hi>
+		std::array<s64, 4> player_kick_lo{};
+		std::array<s64, 4> player_kick_hi{};
 		std::string hold_when;     // HoldWhen = <output> <value>: while it has that value, holding a gun's trigger sends Pn_Hold
 		s64 hold_when_value = 0;   //   (1/0 every 100 ms, e.g. rumble while turning a wheel); value or range <lo>-<hi>
 		s64 hold_when_hi = 0;
@@ -337,7 +342,8 @@ namespace
 						if (parse_number(val, ms) && ms >= 0 && ms <= 5000) game.hold_delay_ms = static_cast<int>(ms);
 						else outputs_log.error("%s: HoldDelay must be 0 - 5000 (ms)", entry.name);
 					}
-					else if (lower(key) == "kickwhen" || lower(key) == "holdwhen")
+					else if (lower(key) == "kickwhen" || lower(key) == "holdwhen" ||
+						(lower(key).size() == 11 && lower(key).starts_with('p') && key[1] >= '1' && key[1] <= '4' && lower(key).substr(2) == "_kickwhen"))
 					{
 						auto r = fmt::split(val, {" ", "\t"});
 						const bool changing = r.size() == 3 && lower(r[2]) == "changing";
@@ -353,7 +359,14 @@ namespace
 							else
 								ok = parse_number(r[1], lo) && ((hi = lo), true);
 						}
-						if (ok)
+						if (ok && lower(key) != "kickwhen" && lower(key) != "holdwhen")
+						{
+							const u32 pi = static_cast<u32>(key[1] - '1');
+							game.player_kick_when[pi] = r[0];
+							game.player_kick_lo[pi] = lo;
+							game.player_kick_hi[pi] = hi;
+						}
+						else if (ok)
 						{
 							const bool kick = lower(key) == "kickwhen";
 							(kick ? game.kick_when : game.hold_when) = r[0];
@@ -844,15 +857,16 @@ namespace
 
 				const bool paused = player_index(prefix) < 4 && now < damage_until[player_index(prefix)];
 
-				if (ammo_kicks && v < old && old - v <= 5 && kick_allowed() && !paused)
+				const bool player_ok = kick_allowed() && player_allowed(player_index(prefix));
+				if (ammo_kicks && v < old && old - v <= 5 && player_ok && !paused)
 				{
 					add_pulses(o.kick.empty() ? prefix + "CtmRecoil" : o.kick, static_cast<int>(old - v), now, o.kick_ms, 40);
 				}
-				else if ((what == "shots" || what.starts_with("shots_")) && v > old && v - old <= 5 && kick_allowed() && !paused)
+				else if ((what == "shots" || what.starts_with("shots_")) && v > old && v - old <= 5 && player_ok && !paused)
 				{
 					add_pulses(o.kick.empty() ? prefix + "CtmRecoil" : o.kick, static_cast<int>(v - old), now, o.kick_ms, 40);
 				}
-				else if ((what == "life" && v < old) || (what == "hits" && v > old && kick_allowed()))
+				else if ((what == "life" && v < old) || (what == "hits" && v > old && player_ok))
 				{
 					if (what == "hits") v = 1; // a hit, not a life value: never the killing hit
 					add_pulses(prefix + (v > 0 ? "Damaged" : "Death"), 1, now, 150, 0);
@@ -908,7 +922,7 @@ namespace
 				const std::string prefix = "P" + std::to_string(i + 1) + "_";
 				const bool held = (triggers & (1u << i)) != 0;
 				const s64* life = raw_value(lower(prefix) + "life");
-				const bool allowed = state_ok && (!life || *life > 0) && now >= damage_until[i];
+				const bool allowed = state_ok && player_allowed(i) && (!life || *life > 0) && now >= damage_until[i];
 
 				// a pull that started while kicks were not allowed (e.g. still holding from the wheel) never kicks -
 				// the player has to let go and pull again. Short blips during a pull that started in play are fine.
@@ -933,6 +947,14 @@ namespace
 				if (lower(name) == name_lower) return &v;
 			}
 			return nullptr;
+		}
+
+		// Pn_KickWhen: this player's recoil and damage only while that output has that value (no rule = always)
+		bool player_allowed(u32 pi) const
+		{
+			if (pi >= 4 || active->player_kick_when[pi].empty()) return true;
+			const s64* v = raw_value(lower(active->player_kick_when[pi]));
+			return v && *v >= active->player_kick_lo[pi] && *v <= active->player_kick_hi[pi];
 		}
 
 		bool kick_allowed() const
