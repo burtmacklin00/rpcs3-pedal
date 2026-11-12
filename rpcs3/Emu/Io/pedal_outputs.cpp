@@ -92,11 +92,14 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   Pn_Damaged    1 then 0 when Pn_Life goes down but not to 0 (never on the killing hit)
 //   Pn_Death      1 then 0 when Pn_Life goes down to 0
 //
-// Finding addresses: press F10 while a game runs to save a memory snapshot to
+// Finding addresses: press F10 while a game runs to save a memory snapshot (plus a screenshot in RPCS3's
+// screenshots folder, so you can see what was on screen) to
 // <emulator folder>/outputs/dumps/ (compressed). Snapshots taken at known values (9 bullets, 8 bullets...)
 // are compared to find where the game keeps them.
 // ---------------------------------------------------------------------------------------------
 
+
+extern atomic_t<bool> g_user_asked_for_screenshot; // RSXThread.cpp: next frame is saved as a screenshot
 namespace
 {
 	using clock_type = std::chrono::steady_clock;
@@ -994,6 +997,9 @@ namespace
 		void dump_memory(const std::string& tag = {})
 		{
 			if (Emu.IsStopped()) return;
+
+			// also take a normal RPCS3 screenshot (screenshots folder) so each snapshot has a picture of the screen
+			g_user_asked_for_screenshot = true;
 
 			const std::string dir = rpcs3::utils::get_emu_dir() + "outputs/dumps/";
 			fs::create_path(dir);
