@@ -52,6 +52,8 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   HoldWhen = ShootFlag 0           ; optional: while ShootFlag is 0 (or a range, like KickWhen), holding a gun's trigger
 //                                    ; (at least HoldDelay ms) sends Pn_Hold 1/0 every 100 ms
 //   HoldDelay = 500                  ; optional: how long the trigger must be held before Pn_Hold starts (0 - 5000 ms)
+//   HoldGrace = 500                  ; optional: HoldWhen stays on until its value has been off this long (0 - 5000 ms),
+//                                    ; for game flags that flicker off for a frame now and then
 //   HoldWhen = WheelTimer 1-1000 changing ; "changing": only while that value is also still changing (a countdown
 //                                    ; that stops partway when the wheel ends early)
 //   PlayingLatch = 1                 ; optional: once Pn_Playing has been on, keep showing life/ammo (no LED "death"
@@ -131,6 +133,7 @@ namespace
 		s64 hold_when_value = 0;   //   (1/0 every 100 ms, e.g. rumble while turning a wheel); value or range <lo>-<hi>
 		s64 hold_when_hi = 0;
 		int hold_delay_ms = 500;   // HoldDelay = <ms>: trigger held this long before Pn_Hold starts
+		int hold_grace_ms = 0;     // HoldGrace = <ms>: HoldWhen stays on until its value has been off this long
 		bool hold_changing = false; // HoldWhen ... changing: the value must also still be changing
 		bool playing_latch = false; // PlayingLatch = 1: Pn_Playing only gates until it has been on once
 		bool trigger_start_anywhere = false; // TriggerStart = 3: no-life rule also outside a stage (join from any screen)
@@ -294,6 +297,12 @@ namespace
 						s64 ms = 0;
 						if (parse_number(val, ms) && ms >= 0 && ms <= 2000) game.damage_pause_ms = static_cast<int>(ms);
 						else outputs_log.error("%s: DamagePause must be 0 - 2000 (ms)", entry.name);
+					}
+					else if (lower(key) == "holdgrace")
+					{
+						s64 ms = 0;
+						if (parse_number(val, ms) && ms >= 0 && ms <= 5000) game.hold_grace_ms = static_cast<int>(ms);
+						else outputs_log.error("%s: HoldGrace must be 0 - 5000 (ms)", entry.name);
 					}
 					else if (lower(key) == "holddelay")
 					{
@@ -585,6 +594,7 @@ namespace
 			damage_until = {};
 			playing_seen = {};
 			hold_seen = false;
+			hold_mode_last_on = {};
 			for (auto& t : g_trigger_start) t = false;
 			ts_was_zero = {};
 			ts_press_until = {};
@@ -895,6 +905,7 @@ namespace
 		std::array<int, 4> hold_state{};
 		bool hold_seen = false;
 		bool hold_mode_on = false; // HoldWhen is true right now (e.g. the wheel is on screen)
+		clock_type::time_point hold_mode_last_on{};
 		s64 hold_last_value = 0;
 		clock_type::time_point hold_last_change{};
 
@@ -913,6 +924,9 @@ namespace
 			}
 			// "changing": only while the value moved in the last 300 ms (a countdown that is still running)
 			if (active->hold_changing && now - hold_last_change > std::chrono::milliseconds(300)) mode = false;
+			// HoldGrace: the game's flag can flicker off for a frame or two - stay on until it has been off this long
+			if (mode) hold_mode_last_on = now;
+			else if (active->hold_grace_ms > 0 && hold_mode_last_on != clock_type::time_point{} && now - hold_mode_last_on < std::chrono::milliseconds(active->hold_grace_ms)) mode = true;
 			hold_mode_on = mode;
 			const u8 triggers = mode ? read_triggers() : 0;
 
