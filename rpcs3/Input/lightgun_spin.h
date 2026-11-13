@@ -41,7 +41,10 @@ struct lightgun_spin
 // mode changes.
 struct lightgun_bowl
 {
-    static constexpr std::uint64_t duration_us = 450'000;
+    std::uint64_t duration_us = 450'000; // "The Shoot Bowl Time"
+    // what the swing is doing to the Move right now (also used for the camera image state)
+    bool shaping = false;  // holding the ball or swinging
+    float dy = 0.f, dz = 0.f;
     bool armed = false;
     bool active = false;
     std::uint64_t started = 0;

@@ -60,6 +60,14 @@ public:
 	cfg::_bool shoot_offscreen_middle{ this, "The Shoot Offscreen Middle", false, true };
 	// Pedal build: bowling (Graveyard Alley) - hold Circle + the trigger, let go of the trigger = underarm swing
 	cfg::_bool shoot_bowl{ this, "The Shoot Bowl", false, true };
+	// the swing (so it can be tuned in the profile without a new build)
+	cfg::uint<100, 3000> shoot_bowl_time{ this, "The Shoot Bowl Time", 450, true };          // ms
+	cfg::uint<0, 3000> shoot_bowl_forward{ this, "The Shoot Bowl Forward", 900, true };      // mm towards the screen
+	cfg::uint<0, 3000> shoot_bowl_up{ this, "The Shoot Bowl Up", 550, true };                // mm upwards during the swing
+	cfg::uint<0, 2000> shoot_bowl_low{ this, "The Shoot Bowl Low", 350, true };              // mm lower while holding the ball
+	cfg::uint<0, 2000> shoot_bowl_back{ this, "The Shoot Bowl Back", 250, true };            // mm further back while holding it
+	cfg::_int<-180, 180> shoot_bowl_pitch_start{ this, "The Shoot Bowl Pitch Start", -90, true }; // degrees, -90 = pointing down
+	cfg::_int<-180, 180> shoot_bowl_pitch_end{ this, "The Shoot Bowl Pitch End", 30, true };
 
 	cfg::string& get_button_by_index(int index);
 	cfg::string& get_button(int code);

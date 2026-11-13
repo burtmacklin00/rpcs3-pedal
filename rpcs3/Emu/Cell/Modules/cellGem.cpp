@@ -2044,12 +2044,29 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 			// Circle is the bowling button in The Shoot, not a game button (the menus use Triangle for back)
 			gem_state->pad.digitalbuttons = static_cast<u16>(+gem_state->pad.digitalbuttons & ~CELL_GEM_CTRL_CIRCLE);
 		}
+		// the swing, from the profile (tunable without a new build)
+		struct bowl_params { f32 low, back, fwd, up, p0, p1; u32 ms; };
+		const bowl_params bp = [&]() -> bowl_params
+		{
+			if (!bowl_on || gem_num >= g_cfg_raw_mouse.players.size()) return {350.f, 250.f, 900.f, 550.f, -90.f, 30.f, 450};
+			reader_lock config_lock(g_cfg_raw_mouse.m_mutex);
+			const auto& c = g_cfg_raw_mouse.players[gem_num];
+			return {static_cast<f32>(c->shoot_bowl_low.get()), static_cast<f32>(c->shoot_bowl_back.get()),
+				static_cast<f32>(c->shoot_bowl_forward.get()), static_cast<f32>(c->shoot_bowl_up.get()),
+				static_cast<f32>(c->shoot_bowl_pitch_start.get()), static_cast<f32>(c->shoot_bowl_pitch_end.get()),
+				static_cast<u32>(c->shoot_bowl_time.get())};
+		}();
+		bowl.duration_us = u64{bp.ms} * 1000;
+		bowl.shaping = false;
 		if ((bowl_button || bowl.armed) && bowl_p < 0.f)
 		{
 			// holding the ball: arm hanging down, pointing down
-			pitch_deg = -90.f;
-			gem_state->pos[1] -= 350.f;
-			gem_state->pos[2] += 250.f;
+			pitch_deg = bp.p0;
+			bowl.shaping = true;
+			bowl.dy = -bp.low;
+			bowl.dz = bp.back;
+			gem_state->pos[1] += bowl.dy;
+			gem_state->pos[2] += bowl.dz;
 		}
 		if (bowl_p >= 0.f)
 		{
@@ -2057,17 +2074,21 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 			if (!bowl_was_active)
 			{
 				bowl_origin = ps_move_data::vect<3>({gem_state->pos[0], gem_state->pos[1], gem_state->pos[2]});
-				cellGem.notice("The Shoot P%d: bowling swing", gem_num + 1);
+				cellGem.notice("The Shoot P%d: bowling swing (%d ms, forward %d mm, up %d mm, pitch %d to %d)", gem_num + 1,
+					bp.ms, static_cast<s32>(bp.fwd), static_cast<s32>(bp.up), static_cast<s32>(bp.p0), static_cast<s32>(bp.p1));
 			}
 			const float e = lightgun_bowl::ease(bowl_p);
 			// T stays held until the arm has swung through; the release comes after the swing
 			gem_state->pad.digitalbuttons = static_cast<u16>(+gem_state->pad.digitalbuttons | CELL_GEM_CTRL_T);
 			gem_state->pad.analog_T = 255;
 			// arm: from hanging down and behind (pointing down) to forward and up, the ball towards the screen
-			pitch_deg = -90.f + 120.f * e;
+			pitch_deg = bp.p0 + (bp.p1 - bp.p0) * e;
+			bowl.shaping = true;
+			bowl.dy = -bp.low + bp.up * e;
+			bowl.dz = bp.back - bp.fwd * e;
 			gem_state->pos[0] = bowl_origin.x();
-			gem_state->pos[1] = bowl_origin.y() - 350.f + 550.f * e;
-			gem_state->pos[2] = bowl_origin.z() + 250.f - 900.f * e;
+			gem_state->pos[1] = bowl_origin.y() + bowl.dy;
+			gem_state->pos[2] = bowl_origin.z() + bowl.dz;
 		}
 
 		if (pitch_deg != 0.f)
@@ -2150,6 +2171,11 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 	{
 		// Let's say the sphere is not visible if the position is at the edge of the screen
 		controller.radius_valid = x_pos > 0.0f && x_pos < 1.0f && y_pos > 0.0f && y_pos < 1.0f;
+	}
+	// Pedal build: the camera keeps seeing the sphere while a bowling swing is held / played (the gun may point at the floor)
+	if (gem_mlgb_title() && gem_num < CELL_GEM_MAX_NUM && g_fxo->get<gem_config>().mouse_bowl[gem_num].shaping)
+	{
+		controller.radius_valid = true;
 	}
 
 	if (g_cfg.io.show_move_cursor)
@@ -3537,6 +3563,21 @@ error_code cellGemGetImageState(u32 gem_num, vm::ptr<CellGemImageState> gem_imag
 		gem_image_state->distance = controller.distance_mm;
 		gem_image_state->visible = controller.radius_valid && gem.is_controller_ready(gem_num);
 		gem_image_state->r_valid = controller.radius_valid;
+
+		// Pedal build: The Shoot bowling swing - the camera sees the sphere drop low, then swing up and come closer
+		if (gem_mlgb_title() && (g_cfg.io.move == move_handler::raw_mouse) && gem.mouse_bowl[gem_num].shaping)
+		{
+			const auto& b = gem.mouse_bowl[gem_num];
+			const f32 d0 = controller.distance_mm > 1.f ? controller.distance_mm : 1500.f;
+			const f32 d = std::max(200.f, d0 + b.dz);
+			const f32 r0 = controller.radius;
+			const f32 mm_per_px = r0 > 0.f ? CELL_GEM_SPHERE_RADIUS_MM / r0 : 1.f;
+			gem_image_state->v = gem_image_state->v - b.dy / mm_per_px;
+			gem_image_state->r = r0 * d0 / d;
+			gem_image_state->distance = d;
+			gem_image_state->visible = 1;
+			gem_image_state->r_valid = 1;
+		}
 	}
 
 	return CELL_OK;
