@@ -1976,8 +1976,26 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 	{
 		const f32 max_angle_per_side_h = g_cfg.io.fake_move_rotation_cone_h / 2.0f;
 		const f32 max_angle_per_side_v = g_cfg.io.fake_move_rotation_cone_v / 2.0f;
-		const f32 roll = -PadHandlerBase::degree_to_rad((image_y - half_height) / half_height * max_angle_per_side_v); // This is actually the pitch
-		const f32 pitch = -PadHandlerBase::degree_to_rad((image_x - half_width) / half_width * max_angle_per_side_h); // This is actually the yaw
+		f32 roll = -PadHandlerBase::degree_to_rad((image_y - half_height) / half_height * max_angle_per_side_v); // This is actually the pitch
+		f32 pitch = -PadHandlerBase::degree_to_rad((image_x - half_width) / half_width * max_angle_per_side_h); // This is actually the yaw
+		// Pedal build: The Shoot
+		if (gem_mlgb_title() && gem_num < CELL_GEM_MAX_NUM)
+		{
+			// Deep Strike: the bat points where the gun aims, but much further ("The Shoot Bat Turn" degrees across the screen)
+			if (shoot_bat_enabled(gem_num) && gem_num < g_cfg_raw_mouse.players.size() && max_angle_per_side_h > 0.f)
+			{
+				f32 turn = 180.f;
+				{
+					reader_lock config_lock(g_cfg_raw_mouse.m_mutex);
+					turn = static_cast<f32>(g_cfg_raw_mouse.players[gem_num]->shoot_bat_turn.get());
+				}
+				const f32 gain = turn / (2.f * max_angle_per_side_h);
+				roll *= gain;
+				pitch *= gain;
+			}
+			// bowling: the ball is held at lane height wherever the gun aims (aim only steers left / right)
+			if (g_fxo->get<gem_config>().mouse_bowl[gem_num].shaping) roll = 0.f;
+		}
 		const f32 yaw = PadHandlerBase::degree_to_rad(0.0f);
 		const f32 cr = std::cos(roll * 0.5f);
 		const f32 sr = std::sin(roll * 0.5f);
@@ -2008,17 +2026,8 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 		auto& bowl = gem.mouse_bowl[gem_num];
 		const bool bowl_on = shoot_bowl_enabled(gem_num);
 		if (bowl_on) bowl.update_spin_button(now, (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_SQUARE) != 0, (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_T) != 0);
-		// Pedal build: Deep Strike - right click held turns the bat with the gun instead of spinning
-		auto& bat = gem.mouse_bat[gem_num];
+		// Pedal build: Deep Strike - the bat follows the aim (set above); right click does not spin there
 		const bool bat_on = shoot_bat_enabled(gem_num);
-		const bool bat_was_held = bat.held;
-		f32 bat_turn = 180.f;
-		if (bat_on && gem_num < g_cfg_raw_mouse.players.size())
-		{
-			reader_lock config_lock(g_cfg_raw_mouse.m_mutex);
-			bat_turn = static_cast<f32>(g_cfg_raw_mouse.players[gem_num]->shoot_bat_turn.get());
-		}
-		bat.update(bat_on && (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_SQUARE) != 0, x_pos, bat_turn);
 		const float angle = spin.update(now, shoot_spin_enabled(gem_num) && !bat_on && middle.held && !middle.point_down && !(bowl_on && bowl.spin_button_latched));
 		auto& origin = gem.mouse_spin_origin[gem_num];
 		if (spin.active && !was_spinning)
@@ -2040,26 +2049,6 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 			gem_state->pos[0] = origin.x() + offset[0];
 			gem_state->pos[1] = origin.y();
 			gem_state->pos[2] = origin.z() + offset[1];
-		}
-		if (bat.held)
-		{
-			auto& bat_origin = gem.mouse_bat_origin[gem_num];
-			if (!bat_was_held)
-			{
-				bat_origin = ps_move_data::vect<3>({gem_state->pos[0], gem_state->pos[1], gem_state->pos[2]});
-				cellGem.notice("The Shoot P%d: bat (turn %d degrees across the screen)", gem_num + 1, static_cast<s32>(bat_turn));
-			}
-			// the same turn as the Showtime spin, but only as far (and as fast) as the gun moves
-			const float sy = std::sin(bat.angle * .5f), cy = std::cos(bat.angle * .5f);
-			const auto base = quat;
-			quat.x() = cy*base.x() + sy*base.z();
-			quat.y() = cy*base.y() + sy*base.w();
-			quat.z() = cy*base.z() - sy*base.x();
-			quat.w() = cy*base.w() - sy*base.y();
-			const auto offset = lightgun_spin::orbit(bat.angle);
-			gem_state->pos[0] = bat_origin.x() + offset[0];
-			gem_state->pos[1] = bat_origin.y();
-			gem_state->pos[2] = bat_origin.z() + offset[1];
 		}
 
 		const bool point_down = shoot_point_down_enabled(gem_num) &&
@@ -2108,7 +2097,7 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 			bowl.shaping = true;
 			bowl.dy = -bp.low;
 			bowl.dz = bp.back;
-			gem_state->pos[1] += bowl.dy;
+			gem_state->pos[1] = bowl.dy;   // lane height, not where the gun aims
 			gem_state->pos[2] += bowl.dz;
 		}
 		if (bowl_p >= 0.f)
@@ -2116,7 +2105,7 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 			auto& bowl_origin = gem.mouse_bowl_origin[gem_num];
 			if (!bowl_was_active)
 			{
-				bowl_origin = ps_move_data::vect<3>({gem_state->pos[0], gem_state->pos[1], gem_state->pos[2]});
+				bowl_origin = ps_move_data::vect<3>({gem_state->pos[0], 0.f, gem_state->pos[2]});
 				cellGem.notice("The Shoot P%d: bowling swing (%d ms, forward %d mm, up %d mm, pitch %d to %d)", gem_num + 1,
 					bp.ms, static_cast<s32>(bp.fwd), static_cast<s32>(bp.up), static_cast<s32>(bp.p0), static_cast<s32>(bp.p1));
 			}
@@ -2129,8 +2118,9 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 			}
 			// arm: from hanging down and behind (pointing down) forward along the lane, speeding up to the release.
 			// Sideways: where the gun aims (left / right of the screen centre) is where the ball goes.
+			// the arm keeps turning through the release - the game takes the ball speed from how fast it turns
 			const float e_pitch = std::min(e, 1.f);
-			pitch_deg = bp.p0 + (bp.p1 - bp.p0) * e_pitch;
+			pitch_deg = bp.p0 + (bp.p1 - bp.p0) * e;
 			bowl.shaping = true;
 			bowl.dy = -bp.low + bp.up * e_pitch;
 			bowl.dz = bp.back - bp.fwd * e;
@@ -2222,7 +2212,7 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 		controller.radius_valid = x_pos > 0.0f && x_pos < 1.0f && y_pos > 0.0f && y_pos < 1.0f;
 	}
 	// Pedal build: the camera keeps seeing the sphere while a bowling swing is held / played (the gun may point at the floor)
-	if (gem_mlgb_title() && gem_num < CELL_GEM_MAX_NUM && (g_fxo->get<gem_config>().mouse_bowl[gem_num].shaping || g_fxo->get<gem_config>().mouse_bat[gem_num].held))
+	if (gem_mlgb_title() && gem_num < CELL_GEM_MAX_NUM && (g_fxo->get<gem_config>().mouse_bowl[gem_num].shaping || shoot_bat_enabled(gem_num)))
 	{
 		controller.radius_valid = true;
 	}
@@ -3621,7 +3611,7 @@ error_code cellGemGetImageState(u32 gem_num, vm::ptr<CellGemImageState> gem_imag
 			const f32 d = std::max(200.f, d0 + b.dz);
 			const f32 r0 = controller.radius;
 			const f32 mm_per_px = r0 > 0.f ? CELL_GEM_SPHERE_RADIUS_MM / r0 : 1.f;
-			gem_image_state->v = gem_image_state->v - b.dy / mm_per_px;
+			gem_image_state->v = g_fxo->get<gem_camera_shared>().height / 2.f - b.dy / mm_per_px; // lane height, not the aim
 			gem_image_state->r = r0 * d0 / d;
 			gem_image_state->distance = d;
 			gem_image_state->visible = 1;

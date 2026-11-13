@@ -138,6 +138,7 @@ namespace
 		std::vector<s64> offsets; // non-empty = pointer chain
 		bool relative = false;    // address written as @+0x.. / @-0x..: counted from where [Game] Find was found
 		std::string kick;         // kick=<name>: this weapon's recoil goes to <name> instead of Pn_CtmRecoil
+		std::vector<std::string> off_when; // offwhen=A,B: this output reads 0 while output A or B is not 0
 		int kick_ms = 40;         // pulse=<ms>: how long each kick is held on
 		f64 scale = 1.0;          // scale=<n>: f32 values are multiplied by this before rounding
 		s64 bar = 0;              // bar=<max>: up-and-down level for Display_Range (send max before every rise)
@@ -295,6 +296,11 @@ namespace
 				const usz sign = v.find_first_of("+-");
 				if (sign == umax || sign == 0 || !parse_number(v.substr(sign), out.lua_near_off)) return false;
 				out.lua_near = v.substr(0, sign);
+				continue;
+			}
+			if (pl.starts_with("offwhen="))
+			{
+				for (const auto& n : fmt::split(parts[i].substr(8), {","})) if (!n.empty()) out.off_when.push_back(n);
 				continue;
 			}
 			if (pl.starts_with("bar="))
@@ -684,6 +690,7 @@ namespace
 
 		std::string active_key;
 		std::map<std::string, s64> values;     // last value of every output (watched + made), as sent
+		std::map<std::string, s64> latest;     // last value read for every output (also Mode_ ones), for offwhen=
 		std::map<std::string, s64> raw;        // last value read from the game (watched outputs)
 		std::map<std::string, bool> have;      // watched output read at least once
 		std::deque<pulse> pulses;
@@ -875,6 +882,7 @@ namespace
 			bar_last_sent.clear();
 			bar_pending.clear();
 			bar_sent.clear();
+			latest.clear();
 			g_mode_bowling = false;
 			g_mode_bat = false;
 			lua_last_scan = {};
@@ -1085,6 +1093,12 @@ namespace
 				else if (!read_value(o, found, v)) continue;
 
 				// The Shoot: which Challenge is running (turns the bowling / bat controls on)
+				latest[o.name] = v;
+				for (const auto& n : o.off_when)
+				{
+					if (const auto it = latest.find(n); it != latest.end() && it->second != 0) { v = 0; break; }
+				}
+
 				if (o.name == "Mode_Bowling" || o.name == "Mode_Bat")
 				{
 					std::atomic<bool>& flag = o.name == "Mode_Bowling" ? g_mode_bowling : g_mode_bat;
