@@ -34,16 +34,27 @@ struct lightgun_spin
 };
 
 // Pedal build: The Shoot's bowling challenge (Graveyard Alley) wants the Move held low and pointing down
-// with T held, an underarm swing forward, then T let go. With a gun: hold Circle (it becomes the bowling button;
-// the menus use Triangle for back) - the Move is held low and pointing down - pull and hold the trigger, then let
-// go of the trigger: the swing plays out first (trigger still reported held), then T is released.
-// Without Circle nothing changes, so no other mode is affected.
+// with T held, an underarm swing forward, then T let go. With a gun: pull and hold the trigger, then press and hold
+// right click (the spin button - pressed while the trigger is held it does not spin) - the Move is held low and
+// pointing down - then let go of the trigger: the swing plays out first (trigger still reported held), then T is
+// released. Circle works as the bowling button too. Right click without the trigger held still spins, so no other
+// mode changes.
 struct lightgun_bowl
 {
     static constexpr std::uint64_t duration_us = 450'000;
     bool armed = false;
     bool active = false;
     std::uint64_t started = 0;
+    // right click (the spin button) pressed while the trigger is already held = bowling button, not a spin,
+    // until right click is let go
+    bool spin_button_latched = false;
+    bool spin_button_was_down = false;
+    void update_spin_button(bool spin_button, bool trigger)
+    {
+        if (!spin_button) spin_button_latched = false;
+        else if (!spin_button_was_down && trigger) spin_button_latched = true;
+        spin_button_was_down = spin_button;
+    }
 
     // -1 = no swing, else 0..1 = how far through the swing
     float update(std::uint64_t now, bool trigger, bool bowl_button)
