@@ -2028,12 +2028,27 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 		const bool offscreen = x_pos <= 0.f || x_pos >= 1.f || y_pos <= 0.f || y_pos >= 1.f;
 		const int vertical = lightgun_vertical_direction(spin.active, point_down, offscreen, shoot_point_up_enabled(gem_num));
 
-		// Pedal build: bowling swing (point down + hold trigger, let go of the trigger)
+		// Pedal build: bowling swing (hold Circle + the trigger, let go of the trigger). Only with Circle held,
+		// so no other mode is affected (Circle is only "back" on menus).
 		auto& bowl = gem.mouse_bowl[gem_num];
 		const bool bowl_was_active = bowl.active;
-		const float bowl_p = shoot_bowl_enabled(gem_num) && !spin.active ?
-			bowl.update(now, (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_T) != 0, point_down) : -1.f;
+		const bool bowl_on = shoot_bowl_enabled(gem_num);
+		const bool bowl_button = bowl_on && (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_CIRCLE) != 0;
+		const float bowl_p = bowl_on && !spin.active ?
+			bowl.update(now, (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_T) != 0, bowl_button) : -1.f;
 		float pitch_deg = 90.f * vertical;
+		if (bowl_on)
+		{
+			// Circle is the bowling button in The Shoot, not a game button (the menus use Triangle for back)
+			gem_state->pad.digitalbuttons = static_cast<u16>(+gem_state->pad.digitalbuttons & ~CELL_GEM_CTRL_CIRCLE);
+		}
+		if ((bowl_button || bowl.armed) && bowl_p < 0.f)
+		{
+			// holding the ball: arm hanging down, pointing down
+			pitch_deg = -90.f;
+			gem_state->pos[1] -= 350.f;
+			gem_state->pos[2] += 250.f;
+		}
 		if (bowl_p >= 0.f)
 		{
 			auto& bowl_origin = gem.mouse_bowl_origin[gem_num];
@@ -3607,7 +3622,11 @@ error_code cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, v
 				const auto& data = gem.fake_move_data[gem_num];
 				if (shoot_spin_enabled(gem_num)) inertial_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_SQUARE;
 				if (shoot_point_down_enabled(gem_num)) inertial_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_TRIANGLE;
-				// Pedal build: T stays held while a bowling swing plays out
+				// Pedal build: T stays held while a bowling swing plays out; Circle is the bowling button then
+				if (shoot_bowl_enabled(gem_num))
+				{
+					inertial_state->pad.digitalbuttons = static_cast<u16>(+inertial_state->pad.digitalbuttons & ~CELL_GEM_CTRL_CIRCLE);
+				}
 				if (gem.mouse_bowl[gem_num].active)
 				{
 					inertial_state->pad.digitalbuttons = static_cast<u16>(+inertial_state->pad.digitalbuttons | CELL_GEM_CTRL_T);

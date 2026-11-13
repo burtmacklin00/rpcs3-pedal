@@ -58,7 +58,7 @@ public:
 	cfg::_bool shoot_point_down{ this, "The Shoot Point Down", false, true };
 	cfg::_bool shoot_point_up_offscreen{ this, "The Shoot Point Up Offscreen", false, true };
 	cfg::_bool shoot_offscreen_middle{ this, "The Shoot Offscreen Middle", false, true };
-	// Pedal build: bowling (Graveyard Alley) - point down + hold trigger, let go of the trigger = underarm swing
+	// Pedal build: bowling (Graveyard Alley) - hold Circle + the trigger, let go of the trigger = underarm swing
 	cfg::_bool shoot_bowl{ this, "The Shoot Bowl", false, true };
 
 	cfg::string& get_button_by_index(int index);
