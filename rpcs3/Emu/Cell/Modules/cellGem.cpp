@@ -2000,10 +2000,10 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 		auto& middle = gem.mouse_middle_gesture[gem_num];
 		middle.update((gem_state->pad.digitalbuttons & CELL_GEM_CTRL_SQUARE) != 0,
 			x_pos <= 0.f || x_pos >= 1.f || y_pos <= 0.f || y_pos >= 1.f, shoot_offscreen_middle_enabled(gem_num));
-		// Pedal build: right click pressed while the trigger is already held is the bowling button, not a spin
+		// Pedal build: right click pressed after holding the trigger half a second is the bowling button, not a spin
 		auto& bowl = gem.mouse_bowl[gem_num];
 		const bool bowl_on = shoot_bowl_enabled(gem_num);
-		if (bowl_on) bowl.update_spin_button((gem_state->pad.digitalbuttons & CELL_GEM_CTRL_SQUARE) != 0, (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_T) != 0);
+		if (bowl_on) bowl.update_spin_button(now, (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_SQUARE) != 0, (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_T) != 0);
 		const float angle = spin.update(now, shoot_spin_enabled(gem_num) && middle.held && !middle.point_down && !(bowl_on && bowl.spin_button_latched));
 		auto& origin = gem.mouse_spin_origin[gem_num];
 		if (spin.active && !was_spinning)

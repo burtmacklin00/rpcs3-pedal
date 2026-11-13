@@ -34,8 +34,8 @@ struct lightgun_spin
 };
 
 // Pedal build: The Shoot's bowling challenge (Graveyard Alley) wants the Move held low and pointing down
-// with T held, an underarm swing forward, then T let go. With a gun: pull and hold the trigger, then press and hold
-// right click (the spin button - pressed while the trigger is held it does not spin) - the Move is held low and
+// with T held, an underarm swing forward, then T let go. With a gun: pull and hold the trigger (half a second or
+// more), then press and hold right click (the spin button - after holding the trigger that long it does not spin) - the Move is held low and
 // pointing down - then let go of the trigger: the swing plays out first (trigger still reported held), then T is
 // released. Circle works as the bowling button too. Right click without the trigger held still spins, so no other
 // mode changes.
@@ -45,14 +45,21 @@ struct lightgun_bowl
     bool armed = false;
     bool active = false;
     std::uint64_t started = 0;
-    // right click (the spin button) pressed while the trigger is already held = bowling button, not a spin,
-    // until right click is let go
+    // right click (the spin button) pressed after the trigger has been held for a while (hold_us) = bowling
+    // button, not a spin, until right click is let go. A normal shot is a short pull, so right click during
+    // shooting (even with the trigger still down from a shot) stays the Showtime spin.
+    static constexpr std::uint64_t hold_us = 500'000;
     bool spin_button_latched = false;
     bool spin_button_was_down = false;
-    void update_spin_button(bool spin_button, bool trigger)
+    bool trigger_was_down = false;
+    std::uint64_t trigger_down_since = 0;
+    void update_spin_button(std::uint64_t now, bool spin_button, bool trigger)
     {
+        if (trigger && !trigger_was_down) trigger_down_since = now;
+        trigger_was_down = trigger;
+        const bool held_long = trigger && now >= trigger_down_since && now - trigger_down_since >= hold_us;
         if (!spin_button) spin_button_latched = false;
-        else if (!spin_button_was_down && trigger) spin_button_latched = true;
+        else if (!spin_button_was_down && held_long) spin_button_latched = true;
         spin_button_was_down = spin_button;
     }
 
