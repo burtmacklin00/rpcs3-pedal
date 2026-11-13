@@ -284,6 +284,8 @@ public:
 	std::array<lightgun_spin, CELL_GEM_MAX_NUM> mouse_spin;
 	std::array<lightgun_middle_gesture, CELL_GEM_MAX_NUM> mouse_middle_gesture;
 	std::array<ps_move_data::vect<3>, CELL_GEM_MAX_NUM> mouse_spin_origin;
+	std::array<lightgun_bowl, CELL_GEM_MAX_NUM> mouse_bowl;                 // Pedal build: The Shoot bowling swing
+	std::array<ps_move_data::vect<3>, CELL_GEM_MAX_NUM> mouse_bowl_origin;
 	std::array<u64, CELL_GEM_MAX_NUM> mouse_orientation_time{};
 	std::array<ps_move_data::vect<4>, CELL_GEM_MAX_NUM> mouse_previous_orientation{};
 
@@ -1916,6 +1918,7 @@ static bool shoot_raw_flag(u32 player, cfg::_bool raw_mouse_config::* flag)
 static bool shoot_spin_enabled(u32 player) { return shoot_raw_flag(player, &raw_mouse_config::shoot_spin_360); }
 static bool shoot_point_down_enabled(u32 player) { return shoot_raw_flag(player, &raw_mouse_config::shoot_point_down); }
 static bool shoot_point_up_enabled(u32 player) { return shoot_raw_flag(player, &raw_mouse_config::shoot_point_up_offscreen); }
+static bool shoot_bowl_enabled(u32 player) { return shoot_raw_flag(player, &raw_mouse_config::shoot_bowl); }
 static bool shoot_offscreen_middle_enabled(u32 player)
 {
 	return shoot_point_down_enabled(player) && shoot_raw_flag(player, &raw_mouse_config::shoot_offscreen_middle);
@@ -2024,12 +2027,39 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 			((gem_state->pad.digitalbuttons & CELL_GEM_CTRL_TRIANGLE) || middle.point_down);
 		const bool offscreen = x_pos <= 0.f || x_pos >= 1.f || y_pos <= 0.f || y_pos >= 1.f;
 		const int vertical = lightgun_vertical_direction(spin.active, point_down, offscreen, shoot_point_up_enabled(gem_num));
-		if (vertical != 0)
+
+		// Pedal build: bowling swing (point down + hold trigger, let go of the trigger)
+		auto& bowl = gem.mouse_bowl[gem_num];
+		const bool bowl_was_active = bowl.active;
+		const float bowl_p = shoot_bowl_enabled(gem_num) && !spin.active ?
+			bowl.update(now, (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_T) != 0, point_down) : -1.f;
+		float pitch_deg = 90.f * vertical;
+		if (bowl_p >= 0.f)
+		{
+			auto& bowl_origin = gem.mouse_bowl_origin[gem_num];
+			if (!bowl_was_active)
+			{
+				bowl_origin = ps_move_data::vect<3>({gem_state->pos[0], gem_state->pos[1], gem_state->pos[2]});
+				cellGem.notice("The Shoot P%d: bowling swing", gem_num + 1);
+			}
+			const float e = lightgun_bowl::ease(bowl_p);
+			// T stays held until the arm has swung through; the release comes after the swing
+			gem_state->pad.digitalbuttons = static_cast<u16>(+gem_state->pad.digitalbuttons | CELL_GEM_CTRL_T);
+			gem_state->pad.analog_T = 255;
+			// arm: from hanging down and behind (pointing down) to forward and up, the ball towards the screen
+			pitch_deg = -90.f + 120.f * e;
+			gem_state->pos[0] = bowl_origin.x();
+			gem_state->pos[1] = bowl_origin.y() - 350.f + 550.f * e;
+			gem_state->pos[2] = bowl_origin.z() + 250.f - 900.f * e;
+		}
+
+		if (pitch_deg != 0.f)
 		{
 			// Off-screen prepares the upward pose; the player's real trigger supplies
 			// the new-press edge required by the game's shoot-in-air gesture.
-			constexpr float c = 0.7071067811865475f;
-			const float s = c * vertical;
+			const float half = pitch_deg * 3.14159265358979f / 360.f;
+			const float c = std::cos(half);
+			const float s = std::sin(half);
 			const auto base = quat;
 			quat.x() = c*base.x() + s*base.w();
 			quat.y() = c*base.y() - s*base.z();
@@ -3577,6 +3607,12 @@ error_code cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, v
 				const auto& data = gem.fake_move_data[gem_num];
 				if (shoot_spin_enabled(gem_num)) inertial_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_SQUARE;
 				if (shoot_point_down_enabled(gem_num)) inertial_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_TRIANGLE;
+				// Pedal build: T stays held while a bowling swing plays out
+				if (gem.mouse_bowl[gem_num].active)
+				{
+					inertial_state->pad.digitalbuttons = static_cast<u16>(+inertial_state->pad.digitalbuttons | CELL_GEM_CTRL_T);
+					inertial_state->pad.analog_T = 255;
+				}
 				for (u32 i = 0; i < 3; i++)
 				{
 					inertial_state->accelerometer[i] = data.accelerometer[i];
