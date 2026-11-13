@@ -96,20 +96,36 @@ struct lightgun_bowl
     static float ease(float p) { return p <= 1.f ? p * p : 1.f + 2.f * (p - 1.f); }
 };
 
-// Pedal build: The Shoot's Deep Strike bat. While right click is held the bat turns with the gun:
-// moving the gun across the screen turns the Move (and swings the arm round), as fast as the gun moves.
+// Pedal build: The Shoot's Deep Strike bat. The gun's stick (arrow keys -> Select) swings the bat:
+// it waits cocked to one side (+1), a flick swings it across (to -1) fast, it stays there a moment, then comes back slowly.
 struct lightgun_bat
 {
-    bool held = false;
-    float x0 = 0.5f;   // where the gun pointed when right click was pressed
-    float angle = 0.f; // radians
-    bool update(bool pressed, float x, float turn_deg)
+    bool was_down = false;
+    bool swinging = false;
+    std::uint64_t started = 0;
+    std::uint64_t swing_us = 250'000;  // "The Shoot Bat Time"
+    std::uint64_t hold_us = 400'000;   // stays swung through
+    std::uint64_t back_us = 700'000;   // slow return, so it does not count as a swing
+    // -1..1 (times half the sweep): where the bat is now
+    float update(std::uint64_t now, bool down)
     {
-        x = x < 0.f ? 0.f : (x > 1.f ? 1.f : x);
-        if (pressed && !held) x0 = x;
-        held = pressed;
-        angle = held ? (x - x0) * turn_deg * 3.14159265358979f / 180.f : 0.f;
-        return held;
+        if (down && !was_down && !swinging) { swinging = true; started = now; }
+        was_down = down;
+        if (!swinging) return 1.f;
+        const std::uint64_t t = now >= started ? now - started : 0;
+        if (t < swing_us)
+        {
+            const float p = static_cast<float>(t) / swing_us;
+            return 1.f - 2.f * (p * p * (3.f - 2.f * p));
+        }
+        if (t < swing_us + hold_us) return -1.f;
+        if (t < swing_us + hold_us + back_us)
+        {
+            const float p = static_cast<float>(t - swing_us - hold_us) / back_us;
+            return -1.f + 2.f * (p * p * (3.f - 2.f * p));
+        }
+        swinging = false;
+        return 1.f;
     }
 };
 

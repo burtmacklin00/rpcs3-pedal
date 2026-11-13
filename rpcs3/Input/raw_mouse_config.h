@@ -72,7 +72,9 @@ public:
 	cfg::uint<0, 1000> shoot_bowl_follow{ this, "The Shoot Bowl Follow", 150, true };        // ms the arm keeps going after the release
 	// Pedal build: Deep Strike bat - hold right click and move the gun sideways, the bat turns with it
 	cfg::_bool shoot_bat{ this, "The Shoot Bat", false, true };
-	cfg::_int<-720, 720> shoot_bat_turn{ this, "The Shoot Bat Turn", 180, true };            // degrees for moving across the whole screen
+	cfg::_int<-720, 720> shoot_bat_turn{ this, "The Shoot Bat Turn", 180, true };            // degrees the bat sweeps (minus = the other way)
+	cfg::uint<50, 2000> shoot_bat_time{ this, "The Shoot Bat Time", 250, true };              // ms for the swing
+	cfg::uint<0, 360> shoot_bat_height{ this, "The Shoot Bat Height", 90, true };             // degrees up / down for aiming over the whole screen height
 
 	cfg::string& get_button_by_index(int index);
 	cfg::string& get_button(int code);

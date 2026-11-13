@@ -287,7 +287,6 @@ public:
 	std::array<lightgun_bowl, CELL_GEM_MAX_NUM> mouse_bowl;                 // Pedal build: The Shoot bowling swing
 	std::array<ps_move_data::vect<3>, CELL_GEM_MAX_NUM> mouse_bowl_origin;
 	std::array<lightgun_bat, CELL_GEM_MAX_NUM> mouse_bat;                   // Pedal build: The Shoot Deep Strike bat
-	std::array<ps_move_data::vect<3>, CELL_GEM_MAX_NUM> mouse_bat_origin;
 	std::array<u64, CELL_GEM_MAX_NUM> mouse_orientation_time{};
 	std::array<ps_move_data::vect<4>, CELL_GEM_MAX_NUM> mouse_previous_orientation{};
 
@@ -1981,17 +1980,25 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 		// Pedal build: The Shoot
 		if (gem_mlgb_title() && gem_num < CELL_GEM_MAX_NUM)
 		{
-			// Deep Strike: the bat points where the gun aims, but much further ("The Shoot Bat Turn" degrees across the screen)
-			if (shoot_bat_enabled(gem_num) && gem_num < g_cfg_raw_mouse.players.size() && max_angle_per_side_h > 0.f)
+			// Deep Strike: aim sets the bat's height (magnified), the gun's stick (arrow keys = Select) swings it across
+			if (shoot_bat_enabled(gem_num) && gem_num < g_cfg_raw_mouse.players.size() && max_angle_per_side_v > 0.f)
 			{
-				f32 turn = 180.f;
+				f32 turn = 180.f, height = 90.f;
+				u32 ms = 250;
 				{
 					reader_lock config_lock(g_cfg_raw_mouse.m_mutex);
-					turn = static_cast<f32>(g_cfg_raw_mouse.players[gem_num]->shoot_bat_turn.get());
+					const auto& c = g_cfg_raw_mouse.players[gem_num];
+					turn = static_cast<f32>(c->shoot_bat_turn.get());
+					height = static_cast<f32>(c->shoot_bat_height.get());
+					ms = static_cast<u32>(c->shoot_bat_time.get());
 				}
-				const f32 gain = turn / (2.f * max_angle_per_side_h);
-				roll *= gain;
-				pitch *= gain;
+				auto& bat = g_fxo->get<gem_config>().mouse_bat[gem_num];
+				bat.swing_us = u64{ms} * 1000;
+				const bool was_swinging = bat.swinging;
+				const f32 a = bat.update(get_guest_system_time(), (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_SELECT) != 0);
+				if (bat.swinging && !was_swinging) cellGem.notice("The Shoot P%d: bat swing (%d degrees, %d ms)", gem_num + 1, static_cast<s32>(turn), ms);
+				roll *= height / (2.f * max_angle_per_side_v);
+				pitch += PadHandlerBase::degree_to_rad(a * turn / 2.f);
 			}
 			// bowling: the ball is held at lane height wherever the gun aims (aim only steers left / right)
 			if (g_fxo->get<gem_config>().mouse_bowl[gem_num].shaping) roll = 0.f;
@@ -2147,6 +2154,8 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 		if (shoot_point_down_enabled(gem_num)) gem_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_TRIANGLE;
 		// The virtual Square slot carries this gesture rather than a game button.
 		if (shoot_spin_enabled(gem_num)) gem_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_SQUARE;
+		// the stick (arrow keys) is the bat swing, never the game's Select
+		if (shoot_raw_flag(gem_num, &raw_mouse_config::shoot_bat)) gem_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_SELECT;
 		u64& previous_time = gem.mouse_orientation_time[gem_num];
 		auto& previous = gem.mouse_previous_orientation[gem_num];
 		if (previous_time == 0 || now < previous_time || now - previous_time >= 1000)
@@ -3703,6 +3712,7 @@ error_code cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, v
 				std::lock_guard history_lock(gem.mouse_history_mutex);
 				const auto& data = gem.fake_move_data[gem_num];
 				if (shoot_spin_enabled(gem_num)) inertial_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_SQUARE;
+				if (shoot_raw_flag(gem_num, &raw_mouse_config::shoot_bat)) inertial_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_SELECT;
 				if (shoot_point_down_enabled(gem_num)) inertial_state->pad.digitalbuttons &= ~CELL_GEM_CTRL_TRIANGLE;
 				// Pedal build: T stays held while a bowling swing plays out; Circle is the bowling button then
 				if (shoot_bowl_enabled(gem_num))
