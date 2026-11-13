@@ -10,6 +10,9 @@
 #include "Utilities/StrUtil.h"
 
 #include <algorithm>
+#include "Input/lightgun_spin.h"
+
+std::array<std::atomic<u32>, 4> g_lightgun_last_key{};
 
 #ifdef _WIN32
 #include <hidusage.h>
@@ -345,7 +348,10 @@ void raw_mouse::update_values(s32 scan_code, bool pressed, u32 vkey)
 	if (bound && m_keys_down.contains(vkey) != pressed) // ignore key repeat
 	{
 		if (pressed)
+		{
 			m_keys_down.insert(vkey);
+			if (m_index < g_lightgun_last_key.size()) g_lightgun_last_key[m_index] = vkey;
+		}
 		else
 			m_keys_down.erase(vkey);
 

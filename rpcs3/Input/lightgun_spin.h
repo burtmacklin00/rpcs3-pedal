@@ -4,6 +4,10 @@
 #include <cstdint>
 #include <cmath>
 #include <array>
+#include <atomic>
+
+// Pedal build: last bound key each player pressed (raw mouse Key Buttons) - the bat reads the stick's direction from it
+extern std::array<std::atomic<std::uint32_t>, 4> g_lightgun_last_key;
 
 // One complete turn per press; holding the input does not repeat it.
 struct lightgun_spin
@@ -106,6 +110,7 @@ struct lightgun_bat
     bool swinging = false;
     bool winding = false;
     float cock = 0.f;                  // 0 = at the aim, 1 = cocked
+    int dir = 1;                       // which way the stick was flicked (1 = left, -1 = right): the bat swings that way
     float wind_from = 0.f;
     std::uint64_t started = 0;
     std::uint64_t last = 0;
@@ -118,13 +123,14 @@ struct lightgun_bat
 
     static float smooth(float p) { return p * p * (3.f - 2.f * p); }
 
-    // -1..1 (times half the sweep): where the bat is now
-    float update(std::uint64_t now, bool down)
+    // -1..1 (times half the sweep, times dir): where the bat is now
+    float update(std::uint64_t now, bool down, int new_dir)
     {
         const std::uint64_t dt = last && now > last ? now - last : 0;
         last = now;
         if (down && !was_down && !swinging && !winding)
         {
+            if (new_dir != dir) { cock = -cock; dir = new_dir; } // other side: wind up across from where it is
             if (cock >= 0.99f) { swinging = true; started = now; }
             else { winding = true; started = now; wind_from = cock; }
         }
@@ -132,7 +138,7 @@ struct lightgun_bat
 
         if (winding)
         {
-            const std::uint64_t len = static_cast<std::uint64_t>(wind_us * (1.f - wind_from)) + 1;
+            const std::uint64_t len = static_cast<std::uint64_t>(wind_us * (1.f - wind_from)) + 1; // from -1 (other side) takes twice as long
             const std::uint64_t t = now >= started ? now - started : 0;
             if (t < len) { cock = wind_from + (1.f - wind_from) * smooth(static_cast<float>(t) / len); return cock; }
             winding = false; cock = 1.f; swinging = true; started = now;
@@ -145,7 +151,11 @@ struct lightgun_bat
             if (t < swing_us + hold_us + back_us) return -1.f + 2.f * smooth(static_cast<float>(t - swing_us - hold_us) / back_us);
             swinging = false; cock = 1.f; cocked_until = now + stay_us;
         }
-        if (now >= cocked_until && cock > 0.f) cock = cock - dt / 1'500'000.f > 0.f ? cock - dt / 1'500'000.f : 0.f; // drift back to the aim
+        if (now >= cocked_until && cock != 0.f) // drift back to the aim
+        {
+            const float step = dt / 1'500'000.f;
+            cock = cock > 0.f ? (cock - step > 0.f ? cock - step : 0.f) : (cock + step < 0.f ? cock + step : 0.f);
+        }
         return cock;
     }
 };

@@ -1995,7 +1995,9 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 				auto& bat = g_fxo->get<gem_config>().mouse_bat[gem_num];
 				bat.swing_us = u64{ms} * 1000;
 				const bool was_swinging = bat.swinging;
-				const f32 a = bat.update(get_guest_system_time(), (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_SELECT) != 0);
+				// the stick's direction picks the swing direction: right arrow (39) swings the other way round to left (37)
+				const int dir = g_lightgun_last_key[gem_num & 3].load() == 39 ? -1 : 1;
+				const f32 a = bat.update(get_guest_system_time(), (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_SELECT) != 0, dir) * bat.dir;
 				if (bat.swinging && !was_swinging) cellGem.notice("The Shoot P%d: bat swing (%d degrees, %d ms)", gem_num + 1, static_cast<s32>(turn), ms);
 				if (height > 0.f) roll *= height / (2.f * max_angle_per_side_v); // 0 = normal aim (menus point as usual)
 				pitch += PadHandlerBase::degree_to_rad(a * turn / 2.f);
