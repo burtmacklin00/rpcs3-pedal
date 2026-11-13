@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <set>
 #include <cctype>
 #include <cstdlib>
 #include <chrono>
@@ -193,6 +194,9 @@ namespace
 	std::atomic<bool> g_stop{false};
 	std::array<std::atomic<bool>, 4> g_trigger_start{}; // TriggerStart: read by cellGem
 	std::array<std::atomic<s64>, 4> g_gem_rumble{};        // Move controller rumble the game set (cellGemSetRumble)
+	// The Shoot: inside the bowling / Deep Strike Challenge (outputs Mode_Bowling / Mode_Bat not 0) - read by cellGem
+	std::atomic<bool> g_mode_bowling{false};
+	std::atomic<bool> g_mode_bat{false};
 	std::array<std::array<std::atomic<s64>, 256>, 4> g_gem_rumble_starts{}; // [gem][v]: times the rumble went from below v to v or more
 	std::thread g_thread;
 	std::once_flag g_once;
@@ -752,17 +756,55 @@ namespace
 			return 0;
 		}
 
+		// bars (bar=): Hook of the Reaper takes the first value it gets as "full" - a 0 there can make it hang.
+		// So a bar's 0 is only sent once the bar has had a real value, and a bar sends at most 4 times a second.
+		std::set<std::string> bar_started;
+		std::map<std::string, clock_type::time_point> bar_last_sent;
+		std::map<std::string, s64> bar_pending;   // value waiting for the next allowed send
+		std::map<std::string, s64> bar_sent;      // last value sent to Hook of the Reaper
+		static constexpr auto bar_gap = std::chrono::milliseconds(250);
+
+		void send_bar(const std::string& name, s64 value, s64 max)
+		{
+			if (value == 0 && !bar_started.contains(name)) return;
+			const auto sent_it = bar_sent.find(name);
+			const s64 old = sent_it == bar_sent.end() ? 0 : sent_it->second;
+			if (sent_it != bar_sent.end() && old == value) return;
+			// a rise is shown as a refill to full - send full first, then the real level
+			if (value > 0 && value < max && (value > old || !bar_started.contains(name)))
+			{
+				broadcast(fmt::format("%s = %d\r", name, max));
+			}
+			if (value > 0) bar_started.insert(name);
+			if (active && active->debug) outputs_log.notice("%s = %d", name, value);
+			broadcast(fmt::format("%s = %d\r", name, value));
+			bar_sent[name] = value;
+			bar_last_sent[name] = clock_type::now();
+		}
+
+		void flush_bars()
+		{
+			const auto now = clock_type::now();
+			for (auto it = bar_pending.begin(); it != bar_pending.end();)
+			{
+				if (now - bar_last_sent[it->first] < bar_gap) { ++it; continue; }
+				const auto [name, value] = *it;
+				it = bar_pending.erase(it);
+				send_bar(name, value, bar_max(name));
+			}
+		}
+
 		void set(const std::string& name, s64 value)
 		{
 			auto [it, added] = values.try_emplace(name, value);
 			if (!added && it->second == value) return;
-			const s64 old = added ? 0 : it->second;
 			it->second = value;
 
-			// bar: Hook of the Reaper shows a rise as a refill to full - send full first, then the real level
-			if (const s64 max = bar_max(name); max > 0 && value > old && value > 0 && value < max)
+			if (const s64 max = bar_max(name); max > 0)
 			{
-				broadcast(fmt::format("%s = %d\r", name, max));
+				if (clock_type::now() - bar_last_sent[name] < bar_gap) bar_pending[name] = value;
+				else { bar_pending.erase(name); send_bar(name, value, max); }
+				return;
 			}
 
 			if (active && active->debug)
@@ -792,6 +834,9 @@ namespace
 					send_to(c, fmt::format("mame_start = %s\r", active->rom));
 					for (const auto& [name, value] : values)
 					{
+						const s64 max = bar_max(name);
+						if (max > 0 && !bar_started.contains(name)) continue;
+						if (max > 0 && value > 0 && value < max) send_to(c, fmt::format("%s = %d\r", name, max));
 						send_to(c, fmt::format("%s = %d\r", name, value));
 					}
 				}
@@ -826,6 +871,12 @@ namespace
 			found = 0;
 			lua_slot.clear();
 			lua_key.clear();
+			bar_started.clear();
+			bar_last_sent.clear();
+			bar_pending.clear();
+			bar_sent.clear();
+			g_mode_bowling = false;
+			g_mode_bat = false;
 			lua_last_scan = {};
 			hold_state = {};
 			hold_next = {};
@@ -914,6 +965,7 @@ namespace
 					// skip 0: a life of 0 would make Hook of the Reaper play the death effect again
 					if (value == 0) continue;
 					// a bar: full first, so a Hook of the Reaper that missed the start still knows the full level
+					if (const s64 max = bar_max(name); max > 0 && !bar_started.contains(name)) continue;
 					if (const s64 max = bar_max(name); max > 0 && value < max) broadcast(fmt::format("%s = %d\r", name, max));
 					broadcast(fmt::format("%s = %d\r", name, value));
 				}
@@ -1031,6 +1083,14 @@ namespace
 				s64 v = 0;
 				if (o.lua) v = lua_read(o, now);
 				else if (!read_value(o, found, v)) continue;
+
+				// The Shoot: which Challenge is running (turns the bowling / bat controls on)
+				if (o.name == "Mode_Bowling" || o.name == "Mode_Bat")
+				{
+					std::atomic<bool>& flag = o.name == "Mode_Bowling" ? g_mode_bowling : g_mode_bat;
+					if (flag.exchange(v != 0) != (v != 0)) outputs_log.notice("%s: %s", o.name, v != 0 ? "on" : "off");
+					continue;
+				}
 
 				const auto old_it = raw.find(o.name);
 				const bool had = have[o.name] && old_it != raw.end();
@@ -1353,6 +1413,7 @@ namespace
 				check_game();
 				poll_values();
 				run_pulses();
+				flush_bars();
 				resend_values();
 				check_capture();
 
@@ -1385,6 +1446,9 @@ namespace pedal_outputs
 	{
 		return player < 4 && g_trigger_start[player].load();
 	}
+
+	bool shoot_mode_bowling() { return g_mode_bowling.load(); }
+	bool shoot_mode_bat() { return g_mode_bat.load(); }
 
 	void gem_rumble(u32 gem_num, u8 rumble)
 	{
@@ -1426,6 +1490,8 @@ namespace pedal_outputs
 {
 	void start() {}
 	bool trigger_is_start(u32) { return false; }
+	bool shoot_mode_bowling() { return false; }
+	bool shoot_mode_bat() { return false; }
 	void gem_rumble(u32, u8) {}
 }
 

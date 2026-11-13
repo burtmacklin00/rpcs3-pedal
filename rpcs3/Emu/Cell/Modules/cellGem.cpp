@@ -286,6 +286,8 @@ public:
 	std::array<ps_move_data::vect<3>, CELL_GEM_MAX_NUM> mouse_spin_origin;
 	std::array<lightgun_bowl, CELL_GEM_MAX_NUM> mouse_bowl;                 // Pedal build: The Shoot bowling swing
 	std::array<ps_move_data::vect<3>, CELL_GEM_MAX_NUM> mouse_bowl_origin;
+	std::array<lightgun_bat, CELL_GEM_MAX_NUM> mouse_bat;                   // Pedal build: The Shoot Deep Strike bat
+	std::array<ps_move_data::vect<3>, CELL_GEM_MAX_NUM> mouse_bat_origin;
 	std::array<u64, CELL_GEM_MAX_NUM> mouse_orientation_time{};
 	std::array<ps_move_data::vect<4>, CELL_GEM_MAX_NUM> mouse_previous_orientation{};
 
@@ -1918,7 +1920,9 @@ static bool shoot_raw_flag(u32 player, cfg::_bool raw_mouse_config::* flag)
 static bool shoot_spin_enabled(u32 player) { return shoot_raw_flag(player, &raw_mouse_config::shoot_spin_360); }
 static bool shoot_point_down_enabled(u32 player) { return shoot_raw_flag(player, &raw_mouse_config::shoot_point_down); }
 static bool shoot_point_up_enabled(u32 player) { return shoot_raw_flag(player, &raw_mouse_config::shoot_point_up_offscreen); }
-static bool shoot_bowl_enabled(u32 player) { return shoot_raw_flag(player, &raw_mouse_config::shoot_bowl); }
+// Pedal build: bowling / bat only inside their Challenges (pedal_outputs finds the Challenge's own Lua values)
+static bool shoot_bowl_enabled(u32 player) { return pedal_outputs::shoot_mode_bowling() && shoot_raw_flag(player, &raw_mouse_config::shoot_bowl); }
+static bool shoot_bat_enabled(u32 player) { return pedal_outputs::shoot_mode_bat() && shoot_raw_flag(player, &raw_mouse_config::shoot_bat); }
 static bool shoot_offscreen_middle_enabled(u32 player)
 {
 	return shoot_point_down_enabled(player) && shoot_raw_flag(player, &raw_mouse_config::shoot_offscreen_middle);
@@ -2004,7 +2008,18 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 		auto& bowl = gem.mouse_bowl[gem_num];
 		const bool bowl_on = shoot_bowl_enabled(gem_num);
 		if (bowl_on) bowl.update_spin_button(now, (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_SQUARE) != 0, (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_T) != 0);
-		const float angle = spin.update(now, shoot_spin_enabled(gem_num) && middle.held && !middle.point_down && !(bowl_on && bowl.spin_button_latched));
+		// Pedal build: Deep Strike - right click held turns the bat with the gun instead of spinning
+		auto& bat = gem.mouse_bat[gem_num];
+		const bool bat_on = shoot_bat_enabled(gem_num);
+		const bool bat_was_held = bat.held;
+		f32 bat_turn = 180.f;
+		if (bat_on && gem_num < g_cfg_raw_mouse.players.size())
+		{
+			reader_lock config_lock(g_cfg_raw_mouse.m_mutex);
+			bat_turn = static_cast<f32>(g_cfg_raw_mouse.players[gem_num]->shoot_bat_turn.get());
+		}
+		bat.update(bat_on && (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_SQUARE) != 0, x_pos, bat_turn);
+		const float angle = spin.update(now, shoot_spin_enabled(gem_num) && !bat_on && middle.held && !middle.point_down && !(bowl_on && bowl.spin_button_latched));
 		auto& origin = gem.mouse_spin_origin[gem_num];
 		if (spin.active && !was_spinning)
 		{
@@ -2026,6 +2041,26 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 			gem_state->pos[1] = origin.y();
 			gem_state->pos[2] = origin.z() + offset[1];
 		}
+		if (bat.held)
+		{
+			auto& bat_origin = gem.mouse_bat_origin[gem_num];
+			if (!bat_was_held)
+			{
+				bat_origin = ps_move_data::vect<3>({gem_state->pos[0], gem_state->pos[1], gem_state->pos[2]});
+				cellGem.notice("The Shoot P%d: bat (turn %d degrees across the screen)", gem_num + 1, static_cast<s32>(bat_turn));
+			}
+			// the same turn as the Showtime spin, but only as far (and as fast) as the gun moves
+			const float sy = std::sin(bat.angle * .5f), cy = std::cos(bat.angle * .5f);
+			const auto base = quat;
+			quat.x() = cy*base.x() + sy*base.z();
+			quat.y() = cy*base.y() + sy*base.w();
+			quat.z() = cy*base.z() - sy*base.x();
+			quat.w() = cy*base.w() - sy*base.y();
+			const auto offset = lightgun_spin::orbit(bat.angle);
+			gem_state->pos[0] = bat_origin.x() + offset[0];
+			gem_state->pos[1] = bat_origin.y();
+			gem_state->pos[2] = bat_origin.z() + offset[1];
+		}
 
 		const bool point_down = shoot_point_down_enabled(gem_num) &&
 			((gem_state->pad.digitalbuttons & CELL_GEM_CTRL_TRIANGLE) || middle.point_down);
@@ -2045,18 +2080,20 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 			gem_state->pad.digitalbuttons = static_cast<u16>(+gem_state->pad.digitalbuttons & ~CELL_GEM_CTRL_CIRCLE);
 		}
 		// the swing, from the profile (tunable without a new build)
-		struct bowl_params { f32 low, back, fwd, up, p0, p1; u32 ms; };
+		struct bowl_params { f32 low, back, fwd, up, p0, p1; u32 ms; f32 steer; u32 follow_ms; };
 		const bowl_params bp = [&]() -> bowl_params
 		{
-			if (!bowl_on || gem_num >= g_cfg_raw_mouse.players.size()) return {350.f, 250.f, 900.f, 550.f, -90.f, 30.f, 450};
+			if (!bowl_on || gem_num >= g_cfg_raw_mouse.players.size()) return {350.f, 250.f, 900.f, 550.f, -90.f, 30.f, 450, 800.f, 150};
 			reader_lock config_lock(g_cfg_raw_mouse.m_mutex);
 			const auto& c = g_cfg_raw_mouse.players[gem_num];
 			return {static_cast<f32>(c->shoot_bowl_low.get()), static_cast<f32>(c->shoot_bowl_back.get()),
 				static_cast<f32>(c->shoot_bowl_forward.get()), static_cast<f32>(c->shoot_bowl_up.get()),
 				static_cast<f32>(c->shoot_bowl_pitch_start.get()), static_cast<f32>(c->shoot_bowl_pitch_end.get()),
-				static_cast<u32>(c->shoot_bowl_time.get())};
+				static_cast<u32>(c->shoot_bowl_time.get()), static_cast<f32>(c->shoot_bowl_steer.get()),
+				static_cast<u32>(c->shoot_bowl_follow.get())};
 		}();
 		bowl.duration_us = u64{bp.ms} * 1000;
+		bowl.follow_us = u64{bp.follow_ms} * 1000;
 		bowl.shaping = false;
 		if (bowl_on && bowl.t_released_for_regrab(now))
 		{
@@ -2084,15 +2121,21 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 					bp.ms, static_cast<s32>(bp.fwd), static_cast<s32>(bp.up), static_cast<s32>(bp.p0), static_cast<s32>(bp.p1));
 			}
 			const float e = lightgun_bowl::ease(bowl_p);
-			// T stays held until the arm has swung through; the release comes after the swing
-			gem_state->pad.digitalbuttons = static_cast<u16>(+gem_state->pad.digitalbuttons | CELL_GEM_CTRL_T);
-			gem_state->pad.analog_T = 255;
-			// arm: from hanging down and behind (pointing down) to forward and up, the ball towards the screen
-			pitch_deg = bp.p0 + (bp.p1 - bp.p0) * e;
+			// T stays held until the arm has swung through; then the release, while the arm keeps going
+			if (bowl_p < 1.f)
+			{
+				gem_state->pad.digitalbuttons = static_cast<u16>(+gem_state->pad.digitalbuttons | CELL_GEM_CTRL_T);
+				gem_state->pad.analog_T = 255;
+			}
+			// arm: from hanging down and behind (pointing down) forward along the lane, speeding up to the release.
+			// Sideways: where the gun aims (left / right of the screen centre) is where the ball goes.
+			const float e_pitch = std::min(e, 1.f);
+			pitch_deg = bp.p0 + (bp.p1 - bp.p0) * e_pitch;
 			bowl.shaping = true;
-			bowl.dy = -bp.low + bp.up * e;
+			bowl.dy = -bp.low + bp.up * e_pitch;
 			bowl.dz = bp.back - bp.fwd * e;
-			gem_state->pos[0] = bowl_origin.x();
+			const f32 side = (std::clamp(x_pos, 0.f, 1.f) - 0.5f) * bp.steer;
+			gem_state->pos[0] = bowl_origin.x() + side * e;
 			gem_state->pos[1] = bowl_origin.y() + bowl.dy;
 			gem_state->pos[2] = bowl_origin.z() + bowl.dz;
 		}
@@ -2179,7 +2222,7 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 		controller.radius_valid = x_pos > 0.0f && x_pos < 1.0f && y_pos > 0.0f && y_pos < 1.0f;
 	}
 	// Pedal build: the camera keeps seeing the sphere while a bowling swing is held / played (the gun may point at the floor)
-	if (gem_mlgb_title() && gem_num < CELL_GEM_MAX_NUM && g_fxo->get<gem_config>().mouse_bowl[gem_num].shaping)
+	if (gem_mlgb_title() && gem_num < CELL_GEM_MAX_NUM && (g_fxo->get<gem_config>().mouse_bowl[gem_num].shaping || g_fxo->get<gem_config>().mouse_bat[gem_num].held))
 	{
 		controller.radius_valid = true;
 	}
@@ -3681,7 +3724,7 @@ error_code cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, v
 					inertial_state->pad.digitalbuttons = static_cast<u16>(+inertial_state->pad.digitalbuttons & ~CELL_GEM_CTRL_T);
 					inertial_state->pad.analog_T = 0;
 				}
-				if (gem.mouse_bowl[gem_num].active)
+				if (gem.mouse_bowl[gem_num].swinging(get_guest_system_time()))
 				{
 					inertial_state->pad.digitalbuttons = static_cast<u16>(+inertial_state->pad.digitalbuttons | CELL_GEM_CTRL_T);
 					inertial_state->pad.analog_T = 255;

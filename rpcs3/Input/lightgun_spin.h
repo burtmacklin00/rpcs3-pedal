@@ -71,12 +71,15 @@ struct lightgun_bowl
         spin_button_was_down = spin_button;
     }
 
-    // -1 = no swing, else 0..1 = how far through the swing
+    // follow-through after the release (the arm keeps going, so the ball leaves at full speed)
+    std::uint64_t follow_us = 150'000; // "The Shoot Bowl Follow"
+
+    // -1 = no swing, else 0..1 = how far through the swing, above 1 = follow-through (T already let go)
     float update(std::uint64_t now, bool trigger, bool bowl_button)
     {
         if (active)
         {
-            if (now >= started && now - started < duration_us) return static_cast<float>(now - started) / duration_us;
+            if (now >= started && now - started < duration_us + follow_us) return static_cast<float>(now - started) / duration_us;
             active = false;
             armed = false;
         }
@@ -86,8 +89,28 @@ struct lightgun_bowl
         return -1.f;
     }
 
-    // smooth start and stop, fastest in the middle (like an arm)
-    static float ease(float p) { return 0.5f - 0.5f * std::cos(3.14159265358979f * p); }
+    // still swinging (T held); false during the follow-through
+    bool swinging(std::uint64_t now) const { return active && now >= started && now - started < duration_us; }
+
+    // speeding up all the way to the release (fastest when the ball is let go), then going on at that speed
+    static float ease(float p) { return p <= 1.f ? p * p : 1.f + 2.f * (p - 1.f); }
+};
+
+// Pedal build: The Shoot's Deep Strike bat. While right click is held the bat turns with the gun:
+// moving the gun across the screen turns the Move (and swings the arm round), as fast as the gun moves.
+struct lightgun_bat
+{
+    bool held = false;
+    float x0 = 0.5f;   // where the gun pointed when right click was pressed
+    float angle = 0.f; // radians
+    bool update(bool pressed, float x, float turn_deg)
+    {
+        x = x < 0.f ? 0.f : (x > 1.f ? 1.f : x);
+        if (pressed && !held) x0 = x;
+        held = pressed;
+        angle = held ? (x - x0) * turn_deg * 3.14159265358979f / 180.f : 0.f;
+        return held;
+    }
 };
 
 // Decide on the press edge, so crossing the screen border cannot change actions.

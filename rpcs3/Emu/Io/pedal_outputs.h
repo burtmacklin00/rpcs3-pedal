@@ -17,6 +17,10 @@ namespace pedal_outputs
 
 	// cellGem: the game set Move controller gem_num's rumble (for outputs "rumble" / "rumbleon")
 	void gem_rumble(unsigned int gem_num, unsigned char rumble);
+
+	// The Shoot: true while the bowling (Mode_Bowling) / Deep Strike (Mode_Bat) Challenge is running (outputs file)
+	bool shoot_mode_bowling();
+	bool shoot_mode_bat();
 }
 
 // Pedal build: per-game profiles.
