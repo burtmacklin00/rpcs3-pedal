@@ -103,7 +103,7 @@ struct lightgun_bowl
 // Pedal build: The Shoot's Deep Strike bat. The gun's stick (arrow keys -> Select) swings the bat.
 // The bat is cocked to one side (+1) while batting and swings across to the other side (-1) fast.
 // Away from batting (start screen, pause menu) it rests where the gun aims (0), so the menus can be pointed at:
-// the first flick winds it up first, and 10 s after the last swing it drifts back to the aim.
+// the first flick only gets the bat ready (cocks it, no swing), and some seconds after the last swing it drifts back to the aim.
 struct lightgun_bat
 {
     bool was_down = false;
@@ -119,7 +119,10 @@ struct lightgun_bat
     static constexpr std::uint64_t wind_us = 300'000;   // wind-up from the aim (first swing only)
     static constexpr std::uint64_t hold_us = 400'000;   // stays swung through
     static constexpr std::uint64_t back_us = 700'000;   // slow return, so it does not count as a swing
-    static constexpr std::uint64_t stay_us = 10'000'000; // stays cocked this long after a swing
+    std::uint64_t stay_us = 10'000'000; // stays cocked this long after a swing ("The Shoot Bat Stay")
+
+    // 0..1: how ready (cocked) the bat is - the height boost only applies while batting
+    float ready() const { return swinging ? 1.f : (cock < 0.f ? -cock : cock); }
 
     static float smooth(float p) { return p * p * (3.f - 2.f * p); }
 
@@ -141,7 +144,7 @@ struct lightgun_bat
             const std::uint64_t len = static_cast<std::uint64_t>(wind_us * (1.f - wind_from)) + 1; // from -1 (other side) takes twice as long
             const std::uint64_t t = now >= started ? now - started : 0;
             if (t < len) { cock = wind_from + (1.f - wind_from) * smooth(static_cast<float>(t) / len); return cock; }
-            winding = false; cock = 1.f; swinging = true; started = now;
+            winding = false; cock = 1.f; cocked_until = now + stay_us; // ready - the next flick swings
         }
         if (swinging)
         {

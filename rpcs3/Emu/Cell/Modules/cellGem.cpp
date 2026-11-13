@@ -1984,22 +1984,25 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 			if (shoot_bat_enabled(gem_num) && gem_num < g_cfg_raw_mouse.players.size() && max_angle_per_side_v > 0.f)
 			{
 				f32 turn = 180.f, height = 90.f;
-				u32 ms = 250;
+				u32 ms = 250, stay = 10;
 				{
 					reader_lock config_lock(g_cfg_raw_mouse.m_mutex);
 					const auto& c = g_cfg_raw_mouse.players[gem_num];
 					turn = static_cast<f32>(c->shoot_bat_turn.get());
 					height = static_cast<f32>(c->shoot_bat_height.get());
 					ms = static_cast<u32>(c->shoot_bat_time.get());
+					stay = static_cast<u32>(c->shoot_bat_stay.get());
 				}
 				auto& bat = g_fxo->get<gem_config>().mouse_bat[gem_num];
 				bat.swing_us = u64{ms} * 1000;
+				bat.stay_us = u64{stay} * 1'000'000;
 				const bool was_swinging = bat.swinging;
 				// the stick's direction picks the swing direction: right arrow (39) swings the other way round to left (37)
 				const int dir = g_lightgun_last_key[gem_num & 3].load() == 39 ? -1 : 1;
 				const f32 a = bat.update(get_guest_system_time(), (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_SELECT) != 0, dir) * bat.dir;
 				if (bat.swinging && !was_swinging) cellGem.notice("The Shoot P%d: bat swing (%d degrees, %d ms)", gem_num + 1, static_cast<s32>(turn), ms);
-				if (height > 0.f) roll *= height / (2.f * max_angle_per_side_v); // 0 = normal aim (menus point as usual)
+				// height boost only while the bat is ready / swinging, so the menus point as usual
+				if (height > 0.f) roll *= 1.f + (height / (2.f * max_angle_per_side_v) - 1.f) * bat.ready();
 				pitch += PadHandlerBase::degree_to_rad(a * turn / 2.f);
 			}
 			// bowling: the ball is held at lane height wherever the gun aims (aim only steers left / right)

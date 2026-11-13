@@ -76,6 +76,7 @@ public:
 	cfg::_int<-720, 720> shoot_bat_turn{ this, "The Shoot Bat Turn", 180, true };            // degrees the bat sweeps (minus = the other way)
 	cfg::uint<50, 2000> shoot_bat_time{ this, "The Shoot Bat Time", 250, true };              // ms for the swing
 	cfg::_int<-80, 80> shoot_bat_accel{ this, "The Shoot Bat Accel", 0, true };              // tenths of g added along the controller while swinging (0 = off)
+	cfg::uint<1, 60> shoot_bat_stay{ this, "The Shoot Bat Stay", 10, true };                 // seconds the bat stays ready after a swing, then it follows the aim again
 	cfg::uint<0, 360> shoot_bat_height{ this, "The Shoot Bat Height", 0, true };              // degrees up / down over the screen height (0 = normal aim)
 
 	cfg::string& get_button_by_index(int index);
