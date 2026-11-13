@@ -47,6 +47,11 @@ struct lightgun_bowl
     float dy = 0.f, dz = 0.f;
     bool armed = false;
     bool active = false;
+    // the game wants the ball held low first, then T pressed ("hold like this, then hold T"): when the bowling
+    // button arms the throw, T is reported let go for regrab_us, then held again (a fresh press while held low)
+    static constexpr std::uint64_t regrab_us = 200'000;
+    std::uint64_t armed_since = 0;
+    bool t_released_for_regrab(std::uint64_t now) const { return armed && !active && now >= armed_since && now - armed_since < regrab_us; }
     std::uint64_t started = 0;
     // right click (the spin button) pressed after the trigger has been held for a while (hold_us) = bowling
     // button, not a spin, until right click is let go. A normal shot is a short pull, so right click during
@@ -75,7 +80,7 @@ struct lightgun_bowl
             active = false;
             armed = false;
         }
-        if (trigger && bowl_button) armed = true;
+        if (trigger && bowl_button) { if (!armed) armed_since = now; armed = true; }
         else if (!trigger && armed) { armed = false; active = true; started = now; return 0.f; }
         else if (!trigger) armed = false;
         return -1.f;

@@ -2058,6 +2058,12 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 		}();
 		bowl.duration_us = u64{bp.ms} * 1000;
 		bowl.shaping = false;
+		if (bowl_on && bowl.t_released_for_regrab(now))
+		{
+			// held low first, then a fresh T press
+			gem_state->pad.digitalbuttons = static_cast<u16>(+gem_state->pad.digitalbuttons & ~CELL_GEM_CTRL_T);
+			gem_state->pad.analog_T = 0;
+		}
 		if ((bowl_button || bowl.armed) && bowl_p < 0.f)
 		{
 			// holding the ball: arm hanging down, pointing down
@@ -3669,6 +3675,11 @@ error_code cellGemGetInertialState(u32 gem_num, u32 state_flag, u64 timestamp, v
 				if (shoot_bowl_enabled(gem_num))
 				{
 					inertial_state->pad.digitalbuttons = static_cast<u16>(+inertial_state->pad.digitalbuttons & ~CELL_GEM_CTRL_CIRCLE);
+				}
+				if (gem.mouse_bowl[gem_num].t_released_for_regrab(get_guest_system_time()))
+				{
+					inertial_state->pad.digitalbuttons = static_cast<u16>(+inertial_state->pad.digitalbuttons & ~CELL_GEM_CTRL_T);
+					inertial_state->pad.analog_T = 0;
 				}
 				if (gem.mouse_bowl[gem_num].active)
 				{
