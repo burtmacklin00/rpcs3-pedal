@@ -1997,7 +1997,7 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 				const bool was_swinging = bat.swinging;
 				const f32 a = bat.update(get_guest_system_time(), (gem_state->pad.digitalbuttons & CELL_GEM_CTRL_SELECT) != 0);
 				if (bat.swinging && !was_swinging) cellGem.notice("The Shoot P%d: bat swing (%d degrees, %d ms)", gem_num + 1, static_cast<s32>(turn), ms);
-				roll *= height / (2.f * max_angle_per_side_v);
+				if (height > 0.f) roll *= height / (2.f * max_angle_per_side_v); // 0 = normal aim (menus point as usual)
 				pitch += PadHandlerBase::degree_to_rad(a * turn / 2.f);
 			}
 			// bowling: the ball is held at lane height wherever the gun aims (aim only steers left / right)
@@ -2180,6 +2180,21 @@ static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& con
 		}
 		const ps_move_data::vect<4> inverse({-quat.x(), -quat.y(), -quat.z(), quat.w()});
 		move_data.accelerometer = ps_move_data::rotate_vector(inverse, ps_move_data::vect<3>({0.f, 0.f, 1.f}));
+		// Pedal build: a real swing also pulls hard along the controller (the arm swinging round) - optional, from the profile
+		if (gem_num < g_cfg_raw_mouse.players.size() && (gem.mouse_bowl[gem_num].shaping || gem.mouse_bat[gem_num].swinging))
+		{
+			s32 tenths = 0;
+			{
+				reader_lock config_lock(g_cfg_raw_mouse.m_mutex);
+				const auto& c = g_cfg_raw_mouse.players[gem_num];
+				tenths = gem.mouse_bowl[gem_num].shaping ? c->shoot_bowl_accel.get() : c->shoot_bat_accel.get();
+			}
+			if (tenths != 0)
+			{
+				const f32 w = std::sqrt(move_data.gyro[0]*move_data.gyro[0] + move_data.gyro[1]*move_data.gyro[1] + move_data.gyro[2]*move_data.gyro[2]);
+				move_data.accelerometer[1] += tenths / 10.f * std::min(1.f, w / 20.f);
+			}
+		}
 		move_data.angvel_world = ps_move_data::rotate_vector(quat, move_data.gyro);
 		for (u32 i = 0; i < 3; i++) gem_state->angvel[i] = move_data.angvel_world[i];
 	}

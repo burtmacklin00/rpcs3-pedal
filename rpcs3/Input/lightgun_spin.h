@@ -96,38 +96,60 @@ struct lightgun_bowl
     static float ease(float p) { return p <= 1.f ? p * p : 1.f + 2.f * (p - 1.f); }
 };
 
-// Pedal build: The Shoot's Deep Strike bat. The gun's stick (arrow keys -> Select) swings the bat:
-// it waits cocked to one side (+1), a flick swings it across (to -1) fast, it stays there a moment, then comes back slowly.
+// Pedal build: The Shoot's Deep Strike bat. The gun's stick (arrow keys -> Select) swings the bat.
+// The bat is cocked to one side (+1) while batting and swings across to the other side (-1) fast.
+// Away from batting (start screen, pause menu) it rests where the gun aims (0), so the menus can be pointed at:
+// the first flick winds it up first, and 10 s after the last swing it drifts back to the aim.
 struct lightgun_bat
 {
     bool was_down = false;
     bool swinging = false;
+    bool winding = false;
+    float cock = 0.f;                  // 0 = at the aim, 1 = cocked
+    float wind_from = 0.f;
     std::uint64_t started = 0;
-    std::uint64_t swing_us = 250'000;  // "The Shoot Bat Time"
-    std::uint64_t hold_us = 400'000;   // stays swung through
-    std::uint64_t back_us = 700'000;   // slow return, so it does not count as a swing
+    std::uint64_t last = 0;
+    std::uint64_t cocked_until = 0;
+    std::uint64_t swing_us = 120'000;  // "The Shoot Bat Time"
+    static constexpr std::uint64_t wind_us = 300'000;   // wind-up from the aim (first swing only)
+    static constexpr std::uint64_t hold_us = 400'000;   // stays swung through
+    static constexpr std::uint64_t back_us = 700'000;   // slow return, so it does not count as a swing
+    static constexpr std::uint64_t stay_us = 10'000'000; // stays cocked this long after a swing
+
+    static float smooth(float p) { return p * p * (3.f - 2.f * p); }
+
     // -1..1 (times half the sweep): where the bat is now
     float update(std::uint64_t now, bool down)
     {
-        if (down && !was_down && !swinging) { swinging = true; started = now; }
+        const std::uint64_t dt = last && now > last ? now - last : 0;
+        last = now;
+        if (down && !was_down && !swinging && !winding)
+        {
+            if (cock >= 0.99f) { swinging = true; started = now; }
+            else { winding = true; started = now; wind_from = cock; }
+        }
         was_down = down;
-        if (!swinging) return 1.f;
-        const std::uint64_t t = now >= started ? now - started : 0;
-        if (t < swing_us)
+
+        if (winding)
         {
-            const float p = static_cast<float>(t) / swing_us;
-            return 1.f - 2.f * (p * p * (3.f - 2.f * p));
+            const std::uint64_t len = static_cast<std::uint64_t>(wind_us * (1.f - wind_from)) + 1;
+            const std::uint64_t t = now >= started ? now - started : 0;
+            if (t < len) { cock = wind_from + (1.f - wind_from) * smooth(static_cast<float>(t) / len); return cock; }
+            winding = false; cock = 1.f; swinging = true; started = now;
         }
-        if (t < swing_us + hold_us) return -1.f;
-        if (t < swing_us + hold_us + back_us)
+        if (swinging)
         {
-            const float p = static_cast<float>(t - swing_us - hold_us) / back_us;
-            return -1.f + 2.f * (p * p * (3.f - 2.f * p));
+            const std::uint64_t t = now >= started ? now - started : 0;
+            if (t < swing_us) return 1.f - 2.f * smooth(static_cast<float>(t) / swing_us);
+            if (t < swing_us + hold_us) return -1.f;
+            if (t < swing_us + hold_us + back_us) return -1.f + 2.f * smooth(static_cast<float>(t - swing_us - hold_us) / back_us);
+            swinging = false; cock = 1.f; cocked_until = now + stay_us;
         }
-        swinging = false;
-        return 1.f;
+        if (now >= cocked_until && cock > 0.f) cock = cock - dt / 1'500'000.f > 0.f ? cock - dt / 1'500'000.f : 0.f; // drift back to the aim
+        return cock;
     }
 };
+
 
 // Decide on the press edge, so crossing the screen border cannot change actions.
 struct lightgun_middle_gesture

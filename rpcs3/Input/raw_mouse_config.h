@@ -70,11 +70,13 @@ public:
 	cfg::_int<-180, 180> shoot_bowl_pitch_end{ this, "The Shoot Bowl Pitch End", 30, true };
 	cfg::uint<0, 3000> shoot_bowl_steer{ this, "The Shoot Bowl Steer", 800, true };          // mm sideways for aiming at the screen edge
 	cfg::uint<0, 1000> shoot_bowl_follow{ this, "The Shoot Bowl Follow", 150, true };        // ms the arm keeps going after the release
+	cfg::_int<-80, 80> shoot_bowl_accel{ this, "The Shoot Bowl Accel", 0, true };            // tenths of g added along the controller while swinging (0 = off, minus = other way)
 	// Pedal build: Deep Strike bat - hold right click and move the gun sideways, the bat turns with it
 	cfg::_bool shoot_bat{ this, "The Shoot Bat", false, true };
 	cfg::_int<-720, 720> shoot_bat_turn{ this, "The Shoot Bat Turn", 180, true };            // degrees the bat sweeps (minus = the other way)
 	cfg::uint<50, 2000> shoot_bat_time{ this, "The Shoot Bat Time", 250, true };              // ms for the swing
-	cfg::uint<0, 360> shoot_bat_height{ this, "The Shoot Bat Height", 90, true };             // degrees up / down for aiming over the whole screen height
+	cfg::_int<-80, 80> shoot_bat_accel{ this, "The Shoot Bat Accel", 0, true };              // tenths of g added along the controller while swinging (0 = off)
+	cfg::uint<0, 360> shoot_bat_height{ this, "The Shoot Bat Height", 0, true };              // degrees up / down over the screen height (0 = normal aim)
 
 	cfg::string& get_button_by_index(int index);
 	cfg::string& get_button(int code);
