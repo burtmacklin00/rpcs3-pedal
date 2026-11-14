@@ -2876,7 +2876,9 @@ static bool mouse_input_to_pad(u32 mouse_no, be_t<u16>& digital_buttons, be_t<u1
 		if (is_pressed(CELL_MOUSE_BUTTON_8) || (is_pressed(CELL_MOUSE_BUTTON_2) && is_pressed(CELL_MOUSE_BUTTON_3)))
 			digital_buttons |= CELL_GEM_CTRL_TRIANGLE;
 
-		analog_t = (mouse_data.buttons & CELL_MOUSE_BUTTON_1) ? 0xFFFF : 0;
+		// Pedal build: the real Move trigger goes 0-255. v0.0.32 sent 0xFFFF, which the older gun games take,
+		// but HOTD Overkill does not count it as a shot - use 255 for Overkill only (BLUS30774)
+		analog_t = (mouse_data.buttons & CELL_MOUSE_BUTTON_1) ? (Emu.GetTitleID() == "BLUS30774" ? 255 : 0xFFFF) : 0;
 
 		return true;
 	}
