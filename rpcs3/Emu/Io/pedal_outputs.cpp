@@ -68,6 +68,8 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //                                    ; continue screen) presses Start with a new trigger pull - joining from the menus
 //   TriggerStart = 2                 ; the same, and also outside a stage (Pn_Playing 0: menus, skip screens, Player 2
 //                                    ; joining on the main menu) every new pull presses Start - not while HoldWhen is on
+//   DamageMax = 2                    ; optional: a life drop bigger than 2 at once is not a hit (no Pn_Damaged / Death) -
+//                                    ; games that set the life when a stage starts (added by NF for HOTD Overkill)
 //   DamagePause = 300                ; optional: no recoil kicks for that player this long after Pn_Damaged, so the
 //                                    ; damage rumble is not cut off by the next kick (0 - 2000 ms)
 //   TriggerRecoil = 125              ; optional, unlimited auto-fire games: kick on every trigger pull and every 125 ms
@@ -116,6 +118,19 @@ LOG_CHANNEL(outputs_log, "HOTR");
 //   Pn_Death      1 then 0 when Pn_Life goes down to 0
 //   Pn_Damaged    also 1 then 0 when Pn_Hits goes up (games with no life bar)
 //
+// Worked out from other outputs (not memory) - added by NF for HOTD Overkill:
+//   P1_Full = full P1_Rounds P1_Hand P1_Shots
+//                     the magazine size of the gun in hand: P1_Rounds is the ammo in hand, P1_Hand changes when the
+//                     player switches gun (one value per gun slot). Learned while playing: the ammo right after a
+//                     reload (any rise) is "full". A drop with no shot fired (new gun from the gun shop) is full too.
+//   P1_Ammo = percent P1_Rounds P1_Full bar=100
+//                     ammo left as 0 - 100 for an LED bar (100 while the gun has no magazine, P1_Full 0)
+//   On a Shots line:  kickby=P1_Full 8:P1_CtmRecoil@150 3:P1_Heavy
+//                     pick the kick by another output's value: <value or lo-hi>:<output>[*kicks per shot][@ms held on].
+//                     Values with no match use kick= (or Pn_CtmRecoil).
+//   [Game] P2_JoinWhen = P2_State 1   a new trigger pull presses Start while that output has that value
+//                     (join the game: the player is on PRESS START). Then nothing for 2 s.
+//
 // Finding addresses: press F10 while a game runs to save a memory snapshot (plus a screenshot in RPCS3's
 // screenshots folder, so you can see what was on screen) to
 // <emulator folder>/outputs/dumps/ (compressed). Snapshots taken at known values (9 bullets, 8 bullets...)
@@ -149,6 +164,11 @@ namespace
 		s64 lua_near_off = 0;
 		int rumble = 0;           // 1 = "rumble <n>": Move controller n's rumble strength, 2 = "rumbleon <n>": times it started
 		int rumble_min = 1;       // rumbleon ... min=<1-255>: only count it when it gets at least this strong
+		int comp = 0;             // 1 = "full <rounds> <hand> <shots>", 2 = "percent <rounds> <full>" (not memory)
+		std::vector<std::string> comp_src;
+		std::string kick_by;      // kickby=<output>: choose the kick output by that output's value
+		struct kick_rule { s64 lo = 0; s64 hi = 0; std::string name; int count = 1; int ms = 0; };
+		std::vector<kick_rule> kick_rules;
 	};
 
 	struct game_def
@@ -164,6 +184,9 @@ namespace
 		std::array<std::string, 4> player_kick_when; // Pn_KickWhen = <output> <value or lo-hi>
 		std::array<s64, 4> player_kick_lo{};
 		std::array<s64, 4> player_kick_hi{};
+		std::array<std::string, 4> player_join_when; // Pn_JoinWhen = <output> <value or lo-hi>: trigger = Start (join)
+		std::array<s64, 4> player_join_lo{};
+		std::array<s64, 4> player_join_hi{};
 		std::string hold_when;     // HoldWhen = <output> <value>: while it has that value, holding a gun's trigger sends Pn_Hold
 		s64 hold_when_value = 0;   //   (1/0 every 100 ms, e.g. rumble while turning a wheel); value or range <lo>-<hi>
 		s64 hold_when_hi = 0;
@@ -175,6 +198,7 @@ namespace
 		bool trigger_start_menus = false; // TriggerStart = 2: also outside a stage (menus, skip screens, joining)
 		bool trigger_start = false; // TriggerStart = 1: trigger = Start while in the stage with no life (continue)
 		int damage_pause_ms = 0;    // DamagePause = <ms>: no kicks for a player this long after Pn_Damaged
+		s64 damage_max = 0;         // DamageMax = <n>: a life drop bigger than this is not a hit (stage start sets the life)
 		bool ammo_needs_life = false; // AmmoNeedsLife = 1: Pn_Ammo is sent as 0 while Pn_Life is 0 (player not playing)
 		bool trigger_recoil_once = false; // TriggerRecoil = once: one kick per pull
 		int trigger_recoil_ms = 0;  // TriggerRecoil = <ms>: games with unlimited auto-fire - kick on every trigger pull and
@@ -249,6 +273,20 @@ namespace
 			}
 			return true;
 		}
+		if (type == "full" || type == "percent")
+		{
+			out.comp = type == "full" ? 1 : 2;
+			for (usz i = 1; i < parts.size(); i++)
+			{
+				if (lower(parts[i]).starts_with("bar="))
+				{
+					if (!parse_number(parts[i].substr(4), out.bar) || out.bar < 1) return false;
+					continue;
+				}
+				out.comp_src.push_back(parts[i]);
+			}
+			return out.comp_src.size() == (out.comp == 1 ? 3u : 2u);
+		}
 		if (type == "lua")
 		{
 			out.lua = true;
@@ -281,6 +319,39 @@ namespace
 			if (pl.starts_with("kick="))
 			{
 				out.kick = parts[i].substr(5);
+				continue;
+			}
+			if (pl.starts_with("kickby="))
+			{
+				out.kick_by = parts[i].substr(7);
+				continue;
+			}
+			if (const usz colon = parts[i].find(':'); colon != umax && colon > 0)
+			{
+				// <value or lo-hi>:<output>[*count]
+				output_def::kick_rule r;
+				const std::string range = parts[i].substr(0, colon);
+				std::string target = parts[i].substr(colon + 1);
+				if (const usz at = target.find('@'); at != umax)
+				{
+					s64 ms = 0;
+					if (!parse_number(target.substr(at + 1), ms) || ms < 10 || ms > 2000) return false;
+					r.ms = static_cast<int>(ms);
+					target.resize(at);
+				}
+				if (const usz star = target.find('*'); star != umax)
+				{
+					s64 n = 0;
+					if (!parse_number(target.substr(star + 1), n) || n < 1 || n > 5) return false;
+					r.count = static_cast<int>(n);
+					target.resize(star);
+				}
+				const usz dash = range.find('-', 1);
+				if (dash != umax ? !(parse_number(range.substr(0, dash), r.lo) && parse_number(range.substr(dash + 1), r.hi))
+					: !(parse_number(range, r.lo) && ((r.hi = r.lo), true))) return false;
+				if (target.empty()) return false;
+				r.name = target;
+				out.kick_rules.push_back(std::move(r));
 				continue;
 			}
 			if (pl.starts_with("pick="))
@@ -388,6 +459,10 @@ namespace
 						game.trigger_start_menus = val == "2";
 						game.trigger_start_anywhere = val == "3";
 					}
+					else if (lower(key) == "damagemax")
+					{
+						if (!parse_number(val, game.damage_max) || game.damage_max < 0) outputs_log.error("%s: DamageMax must be 0 or more", entry.name);
+					}
 					else if (lower(key) == "damagepause")
 					{
 						s64 ms = 0;
@@ -407,7 +482,7 @@ namespace
 						else outputs_log.error("%s: HoldDelay must be 0 - 5000 (ms)", entry.name);
 					}
 					else if (lower(key) == "kickwhen" || lower(key) == "holdwhen" ||
-						(lower(key).size() == 11 && lower(key).starts_with('p') && key[1] >= '1' && key[1] <= '4' && lower(key).substr(2) == "_kickwhen"))
+						(lower(key).size() == 11 && lower(key).starts_with('p') && key[1] >= '1' && key[1] <= '4' && (lower(key).substr(2) == "_kickwhen" || lower(key).substr(2) == "_joinwhen")))
 					{
 						auto r = fmt::split(val, {" ", "\t"});
 						const bool changing = r.size() == 3 && lower(r[2]) == "changing";
@@ -423,7 +498,14 @@ namespace
 							else
 								ok = parse_number(r[1], lo) && ((hi = lo), true);
 						}
-						if (ok && lower(key) != "kickwhen" && lower(key) != "holdwhen")
+						if (ok && lower(key).ends_with("_joinwhen"))
+						{
+							const u32 pi = static_cast<u32>(key[1] - '1');
+							game.player_join_when[pi] = r[0];
+							game.player_join_lo[pi] = lo;
+							game.player_join_hi[pi] = hi;
+						}
+						else if (ok && lower(key) != "kickwhen" && lower(key) != "holdwhen")
 						{
 							const u32 pi = static_cast<u32>(key[1] - '1');
 							game.player_kick_when[pi] = r[0];
@@ -477,6 +559,7 @@ namespace
 	bool read_value(const output_def& o, u32 found, s64& out)
 	{
 		if (o.lua) return false; // read by the server (lua_read)
+		if (o.comp) return false; // worked out by the server (update_computed)
 		if (o.rumble)
 		{
 			out = o.rumble == 1 ? g_gem_rumble[o.address].load() : g_gem_rumble_starts[o.address][o.rumble_min].load();
@@ -903,6 +986,8 @@ namespace
 			trigger_next_kick = {};
 			have.clear();
 			pulses.clear();
+			fulls.clear();
+			ts_last_triggers_join = 0;
 		}
 
 		void check_game()
@@ -1001,6 +1086,7 @@ namespace
 		std::array<clock_type::time_point, 4> ts_cooldown{};
 		std::array<bool, 4> ts_was_zero{};
 		u8 ts_last_triggers = 0;
+		u8 ts_last_triggers_join = 0;
 
 		void update_trigger_start(clock_type::time_point now)
 		{
@@ -1036,9 +1122,21 @@ namespace
 						ts_cooldown[i] = now + std::chrono::milliseconds(500);
 					}
 				}
+				// Pn_JoinWhen: on PRESS START a new pull presses Start once (join)
+				if (active && !active->player_join_when[i].empty() && now >= ts_cooldown[i] &&
+					(read_triggers() & (1u << i)) && !(ts_last_triggers_join & (1u << i)))
+				{
+					const s64* v = raw_value(lower(active->player_join_when[i]));
+					if (v && *v >= active->player_join_lo[i] && *v <= active->player_join_hi[i])
+					{
+						ts_press_until[i] = now + std::chrono::milliseconds(150);
+						ts_cooldown[i] = now + std::chrono::milliseconds(2000);
+					}
+				}
 				g_trigger_start[i] = now < ts_press_until[i];
 			}
 			ts_last_triggers = triggers;
+			ts_last_triggers_join = read_triggers();
 		}
 
 		void add_pulses(const std::string& name, int count, clock_type::time_point now, int length_ms, int gap_ms)
@@ -1066,6 +1164,69 @@ namespace
 				if (lower(o.name).starts_with(start_lower)) return true;
 			}
 			return false;
+		}
+
+		// computed outputs (full / percent) - see the file format notes at the top
+		struct full_state
+		{
+			bool seen = false;
+			s64 key = 0, rounds = 0, shots = 0;
+			std::map<s64, s64> full;           // per gun slot (Pn_Hand value)
+			clock_type::time_point drop_at{};  // ammo went down - was it a shot?
+			s64 drop_shots = 0;
+		};
+		std::map<std::string, full_state> fulls;
+
+		void update_computed(clock_type::time_point now)
+		{
+			for (const output_def& o : active->outputs)
+			{
+				if (o.comp != 1) continue;
+				const s64* rounds = raw_value(lower(o.comp_src[0]));
+				const s64* key = raw_value(lower(o.comp_src[1]));
+				const s64* shots = raw_value(lower(o.comp_src[2]));
+				if (!rounds || !key) continue;
+				full_state& st = fulls[o.name];
+				const s64 sh = shots ? *shots : 0;
+				auto [it, added] = st.full.try_emplace(*key, *rounds);
+				s64& full = it->second;
+				if (!added && st.seen && st.key == *key)
+				{
+					if (*rounds > st.rounds) { full = *rounds; st.drop_at = {}; }          // reload / refill = full
+					else if (*rounds < st.rounds && st.drop_at == clock_type::time_point{})
+					{
+						st.drop_at = now;                                                      // a shot, or a new gun?
+						st.drop_shots = st.shots;  // shots before the drop (a shot may already be counted in this read)
+					}
+				}
+				if (*rounds > full) full = *rounds;
+				// ammo went down but no shot was counted in half a second: not a shot (gun shop) - this is full
+				if (st.drop_at != clock_type::time_point{} && now - st.drop_at >= std::chrono::milliseconds(500))
+				{
+					if (sh == st.drop_shots) full = *rounds;
+					st.drop_at = {};
+				}
+				st.seen = true;
+				st.key = *key;
+				st.rounds = *rounds;
+				st.shots = sh;
+				raw[o.name] = full;
+				have[o.name] = true;
+				set(o.name, full);
+			}
+			for (const output_def& o : active->outputs)
+			{
+				if (o.comp != 2) continue;
+				const s64* rounds = raw_value(lower(o.comp_src[0]));
+				const s64* full = raw_value(lower(o.comp_src[1]));
+				if (!rounds || !full) continue;
+				const s64 v = *full <= 0 ? 100 : std::clamp<s64>(*rounds * 100 / *full, 0, 100);
+				raw[o.name] = v;
+				have[o.name] = true;
+				std::string prefix, what;
+				// a player's Ammo is sent by the display loop below (Pn_Playing gate) - others right away
+				if (!(split_player(o.name, prefix, what) && what == "ammo" && raw_value(lower(prefix) + "playing"))) set(o.name, v);
+			}
 		}
 
 		void poll_values()
@@ -1136,9 +1297,23 @@ namespace
 				}
 				else if ((what == "shots" || what.starts_with("shots_")) && v > old && v - old <= 5 && player_ok && !paused)
 				{
-					add_pulses(o.kick.empty() ? prefix + "CtmRecoil" : o.kick, static_cast<int>(v - old), now, o.kick_ms, 40);
+					std::string target = o.kick.empty() ? prefix + "CtmRecoil" : o.kick;
+					int per_shot = 1;
+					int ms = o.kick_ms;
+					if (!o.kick_by.empty())
+					{
+						if (const s64* by = raw_value(lower(o.kick_by)))
+						{
+							for (const auto& r : o.kick_rules)
+							{
+								if (*by >= r.lo && *by <= r.hi) { target = r.name; per_shot = r.count; if (r.ms) ms = r.ms; break; }
+							}
+						}
+					}
+					add_pulses(target, static_cast<int>(v - old) * per_shot, now, ms, 40);
 				}
-				else if ((what == "life" && v < old) || (what == "hits" && v > old && player_ok))
+				else if ((what == "life" && v < old && (active->damage_max <= 0 || old - v <= active->damage_max) && player_allowed(player_index(prefix))) ||
+					(what == "hits" && v > old && player_ok))
 				{
 					if (what == "hits") v = 1; // a hit, not a life value: never the killing hit
 					add_pulses(prefix + (v > 0 ? "Damaged" : "Death"), 1, now, 150, 0);
@@ -1150,6 +1325,8 @@ namespace
 					}
 				}
 			}
+
+			update_computed(now);
 
 			for (const output_def& o : active->outputs)
 			{
