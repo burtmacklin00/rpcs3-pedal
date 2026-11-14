@@ -1934,7 +1934,8 @@ static std::pair<f32, f32> mlgb_aim(u32 mouse_no, f32 x, f32 y)
 	reader_lock config_lock(g_cfg_raw_mouse.m_mutex);
 	const auto& config = g_cfg_raw_mouse.players[mouse_no];
 	return {lightgun_scale_axis(x, static_cast<float>(config->move_aim_scale_h.get())),
-		lightgun_scale_axis(y, static_cast<float>(config->move_aim_scale_v.get()))};
+		lightgun_top_bend(lightgun_scale_axis(y, static_cast<float>(config->move_aim_scale_v.get())),
+			static_cast<float>(config->move_aim_top_knee.get()), static_cast<float>(config->move_aim_top_scale.get()))};
 }
 
 static inline void pos_to_gem_state(u32 gem_num, gem_config::gem_controller& controller, vm::ptr<CellGemState>& gem_state, f32 x_pos, f32 y_pos, ps_move_data& move_data)

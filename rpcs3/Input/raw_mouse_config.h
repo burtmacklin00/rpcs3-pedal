@@ -53,6 +53,10 @@ public:
 	// set per game in profiles/*.yml. Aim scale: % of the screen the gun covers, from the centre (100 = normal).
 	cfg::uint<10, 200> move_aim_scale_h{ this, "Move Aim Scale Horizontal", 100, true };
 	cfg::uint<10, 200> move_aim_scale_v{ this, "Move Aim Scale Vertical", 100, true };
+	// Pedal build (added by NF): top-of-screen aim bend. Above Top Knee (% of the way from the centre to the top edge)
+	// the vertical movement is multiplied by Top Scale %. Knee 100 or Scale 100 = off (default).
+	cfg::uint<0, 100> move_aim_top_knee{ this, "Move Aim Top Knee", 100, true };
+	cfg::uint<10, 200> move_aim_top_scale{ this, "Move Aim Top Scale", 100, true };
 	// The Shoot gestures: Showtime spin (Square input), point down (Triangle input), off-screen = point up
 	cfg::_bool shoot_spin_360{ this, "The Shoot Spin 360", false, true };
 	cfg::_bool shoot_point_down{ this, "The Shoot Point Down", false, true };
