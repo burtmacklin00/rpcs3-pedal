@@ -60,6 +60,9 @@ public:
 	// Pedal build (added by NF): the very top edge stays on screen (goes through the scale/bend instead of counting
 	// as off-screen), so the crosshair does not jump when the gun reaches the top. Default off.
 	cfg::_bool move_aim_top_onscreen{ this, "Move Aim Top Onscreen", false, true };
+	// Pedal build (added by NF): the left and right edges never count as off-screen (the crosshair stays just inside),
+	// so it does not jump into a top corner when the gun reaches the top and a side together. Default off.
+	cfg::_bool move_aim_sides_onscreen{ this, "Move Aim Sides Onscreen", false, true };
 	// Pedal build (added by NF): calibration snap. While on, pointing within Snap Zone % of the top-left or bottom-right
 	// corner sends the exact corner (Snap Inset in 0.1 % steps in from the edge). Turn on only to calibrate, then off.
 	cfg::_bool move_aim_calibrate_snap{ this, "Move Aim Calibrate Snap", false, true };
