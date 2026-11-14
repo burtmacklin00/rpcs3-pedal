@@ -57,6 +57,11 @@ public:
 	// the vertical movement is multiplied by Top Scale %. Knee 100 or Scale 100 = off (default).
 	cfg::uint<0, 100> move_aim_top_knee{ this, "Move Aim Top Knee", 100, true };
 	cfg::uint<10, 200> move_aim_top_scale{ this, "Move Aim Top Scale", 100, true };
+	// Pedal build (added by NF): calibration snap. While on, pointing within Snap Zone % of the top-left or bottom-right
+	// corner sends the exact corner (Snap Inset in 0.1 % steps in from the edge). Turn on only to calibrate, then off.
+	cfg::_bool move_aim_calibrate_snap{ this, "Move Aim Calibrate Snap", false, true };
+	cfg::uint<1, 45> move_aim_snap_zone{ this, "Move Aim Snap Zone", 20, true };
+	cfg::uint<1, 200> move_aim_snap_inset{ this, "Move Aim Snap Inset", 5, true };
 	// The Shoot gestures: Showtime spin (Square input), point down (Triangle input), off-screen = point up
 	cfg::_bool shoot_spin_360{ this, "The Shoot Spin 360", false, true };
 	cfg::_bool shoot_point_down{ this, "The Shoot Point Down", false, true };

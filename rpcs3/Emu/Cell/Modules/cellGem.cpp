@@ -1933,6 +1933,14 @@ static std::pair<f32, f32> mlgb_aim(u32 mouse_no, f32 x, f32 y)
 	if (g_cfg.io.move != move_handler::raw_mouse || mouse_no >= g_cfg_raw_mouse.players.size()) return {x, y};
 	reader_lock config_lock(g_cfg_raw_mouse.m_mutex);
 	const auto& config = g_cfg_raw_mouse.players[mouse_no];
+	if (config->move_aim_calibrate_snap.get())
+	{
+		// Pedal build: perfect corner shots for calibration (top-left and bottom-right only)
+		const f32 zone = config->move_aim_snap_zone.get() / 100.f;
+		const f32 inset = config->move_aim_snap_inset.get() / 1000.f;
+		if (x < zone && y < zone) return {inset, inset};
+		if (x > 1.f - zone && y > 1.f - zone) return {1.f - inset, 1.f - inset};
+	}
 	return {lightgun_scale_axis(x, static_cast<float>(config->move_aim_scale_h.get())),
 		lightgun_top_bend(lightgun_scale_axis(y, static_cast<float>(config->move_aim_scale_v.get())),
 			static_cast<float>(config->move_aim_top_knee.get()), static_cast<float>(config->move_aim_top_scale.get()))};
