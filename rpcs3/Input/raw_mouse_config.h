@@ -57,6 +57,9 @@ public:
 	// the vertical movement is multiplied by Top Scale %. Knee 100 or Scale 100 = off (default).
 	cfg::uint<0, 100> move_aim_top_knee{ this, "Move Aim Top Knee", 100, true };
 	cfg::uint<10, 200> move_aim_top_scale{ this, "Move Aim Top Scale", 100, true };
+	// Pedal build (added by NF): the very top edge stays on screen (goes through the scale/bend instead of counting
+	// as off-screen), so the crosshair does not jump when the gun reaches the top. Default off.
+	cfg::_bool move_aim_top_onscreen{ this, "Move Aim Top Onscreen", false, true };
 	// Pedal build (added by NF): calibration snap. While on, pointing within Snap Zone % of the top-left or bottom-right
 	// corner sends the exact corner (Snap Inset in 0.1 % steps in from the edge). Turn on only to calibrate, then off.
 	cfg::_bool move_aim_calibrate_snap{ this, "Move Aim Calibrate Snap", false, true };

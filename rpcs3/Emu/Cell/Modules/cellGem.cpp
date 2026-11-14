@@ -1941,6 +1941,7 @@ static std::pair<f32, f32> mlgb_aim(u32 mouse_no, f32 x, f32 y)
 		if (x < zone && y < zone) return {inset, inset};
 		if (x > 1.f - zone && y > 1.f - zone) return {1.f - inset, 1.f - inset};
 	}
+	if (config->move_aim_top_onscreen.get() && y <= 0.f && x > 0.f && x < 1.f) y = 0.0005f;
 	return {lightgun_scale_axis(x, static_cast<float>(config->move_aim_scale_h.get())),
 		lightgun_top_bend(lightgun_scale_axis(y, static_cast<float>(config->move_aim_scale_v.get())),
 			static_cast<float>(config->move_aim_top_knee.get()), static_cast<float>(config->move_aim_top_scale.get()))};
